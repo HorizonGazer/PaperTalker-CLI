@@ -1,5 +1,5 @@
 # Environment variables (contains sensitive API keys)
-.env
+# .env  # Included for project structure completeness
 
 # Python
 __pycache__/
@@ -36,7 +36,7 @@ env/
 .ipynb_checkpoints
 
 # Output files
-output/
+# output/  # Included for project structure completeness
 *.mp4
 *.mp3
 
