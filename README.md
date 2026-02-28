@@ -40,14 +40,38 @@ python quick_video.py "自定义主题
 
 ## 🔧 安装步骤
 
-### 方式一：一键安装（适用于Windows）
+### 方式一：一键安装
 
-运行 `setup.ps1` 或 `setup.bat`，脚本会自动完成以下步骤：
+#### Windows 用户
+
+运行 `setup.ps1` 或 `setup.bat`：
+
+```bash
+# PowerShell
+.\setup.ps1
+
+# 或 CMD
+.\setup.bat
+```
+
+#### macOS/Linux 用户
+
+运行 `setup.sh`：
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+脚本会自动完成以下步骤：
 
 **Step 1: 检测/安装 Conda**
 
 - ✅ 已有 Conda → 直接使用
 - 📦 无 Conda → 从清华镜像自动下载安装 Miniconda
+  - Windows: Miniconda3-latest-Windows-x86_64.exe
+  - macOS: Miniconda3-latest-MacOSX-arm64.sh
+  - Linux: Miniconda3-latest-Linux-x86_64.sh
 
 **Step 2: 创建独立环境**
 
@@ -64,19 +88,23 @@ python quick_video.py "自定义主题
 **Step 4: 验证安装**
 
 - 检查 NotebookLM 认证文件
-- 自动打开新窗口并激活环境
+- Windows: 自动打开新窗口并激活环境
+- macOS/Linux: 提示手动激活环境
+
+安装完成后：
 
 ```bash
-# PowerShell
-.\setup.ps1
+# 激活环境
+conda activate papertalker
 
-# 或 CMD
-.\setup.bat
+# 首次登录
+notebooklm login
+
+# 开始使用
+python quick_video.py "你的主题"
 ```
 
-安装完成后会自动打开新窗口，环境已激活，可直接使用。
-
-### 方式二：手动安装（Windows或Linux）
+### 方式二：手动安装
 
 如果自动安装失败，可以手动执行：
 
@@ -85,15 +113,18 @@ python quick_video.py "自定义主题
 conda create -n papertalker python=3.11 -y
 conda activate papertalker
 
-# 2. 安装依赖
+# 2. 配置 pip 镜像（可选，加速下载）
+pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 3. 安装依赖
 pip install -e deps/notebooklm-py
 pip install -e deps/paper-search-mcp
 pip install python-dotenv httpx rich playwright
 
-# 3. 安装浏览器
+# 4. 安装浏览器
 python -m playwright install chromium
 
-# 4. 登录
+# 5. 登录
 notebooklm login
 ```
 
@@ -250,11 +281,12 @@ PaperTalker-CLI/
 ├── video.md                # 视频生成提示词
 ├── .env                    # 环境配置（代理、API Keys）
 ├── .env.example            # 配置模板
-├── setup.bat               # 主安装脚本（调用子脚本）
-├── setup.ps1               # PowerShell 包装器
-├── setup_conda.bat         # Step 1: 检测/安装 Conda
-├── setup_env.bat           # Step 2: 创建环境
-├── install_deps.bat        # Step 3: 安装依赖
+├── setup.sh                # macOS/Linux 一键安装脚本
+├── setup.bat               # Windows 主安装脚本（调用子脚本）
+├── setup.ps1               # Windows PowerShell 包装器
+├── setup_conda.bat         # Windows Step 1: 检测/安装 Conda
+├── setup_env.bat           # Windows Step 2: 创建环境
+├── install_deps.bat        # Windows Step 3: 安装依赖
 ├── output/                 # 视频输出目录
 ├── deps/                   # 本地依赖包
 │   ├── notebooklm-py/      # NotebookLM 自动化库
@@ -294,6 +326,31 @@ PaperTalker-CLI/
 2. 超时后使用 `--resume` 恢复，无需重新开始
 3. 减少来源数量（`--max-results 5`）
 
+### Q: macOS 上运行 setup.sh 提示权限错误？
+
+**原因**：脚本没有执行权限
+
+**解决**：
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+### Q: macOS 上 Conda 初始化后仍然找不到 conda 命令？
+
+**原因**：需要重启终端或重新加载配置文件
+
+**解决**：
+
+```bash
+# 重新加载配置
+source ~/.bash_profile  # 如果使用 bash
+source ~/.zshrc         # 如果使用 zsh
+
+# 或者直接重启终端
+```
+
 ### Q: 安装脚本在某一步停止？
 
 **原因**：网络问题或环境冲突
@@ -301,13 +358,14 @@ PaperTalker-CLI/
 **解决**：
 
 1. 检查网络连接和代理设置
-2. 手动运行各个子脚本：
+2. **Windows 用户**手动运行各个子脚本：
    ```bash
    .\setup_conda.bat    # 安装 Conda
    .\setup_env.bat      # 创建环境
    .\install_deps.bat   # 安装依赖
    ```
-3. 或使用手动安装方式
+3. **macOS/Linux 用户**查看脚本输出的错误信息，通常是网络问题
+4. 或使用手动安装方式
 
 ### Q: 如何在其他电脑使用？
 
