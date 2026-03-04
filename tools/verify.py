@@ -2,7 +2,7 @@
 import sys, os
 from pathlib import Path
 
-os.chdir(Path(__file__).parent)
+os.chdir(Path(__file__).resolve().parent.parent)  # tools/ -> project root
 from dotenv import load_dotenv
 load_dotenv(".env")
 

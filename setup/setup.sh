@@ -3,6 +3,11 @@
 
 set -e
 
+# Navigate to project root (parent of setup/)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_ROOT"
+
 echo "================================"
 echo "  PaperTalker-CLI 安装向导"
 echo "================================"
@@ -126,11 +131,14 @@ pip install -e deps/notebooklm-py
 echo "正在安装 paper-search-mcp..."
 pip install -e deps/paper-search-mcp
 
-echo "正在安装其他依赖..."
+echo "正在安装上游依赖..."
 pip install python-dotenv httpx rich playwright
 
 echo "正在安装 Chromium 浏览器..."
 python -m playwright install chromium
+
+echo "正在安装下游依赖 (字幕 + 上传)..."
+pip install imageio-ffmpeg faster-whisper jieba "biliup>=1.1.29"
 
 echo -e "${GREEN}✓ 所有依赖安装完成${NC}"
 echo ""
