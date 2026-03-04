@@ -2,12 +2,12 @@
 
 研究主题 → 学术科普视频 → 字幕 → B站发布，全程对话 Claude 完成。
 
-| 主题                            | 时长 | 字幕 | B站          |
-| ------------------------------- | ---- | ---- | ------------ |
-| 虚拟细胞                        | 9:39 | 295  | BV1wjAfztECV |
-| BiOmics：AI生物侦探二人组       | 8:50 | 248  | BV1fMPwz8EqU |
-| SpatialData：空间组学的通用框架 | 7:42 | 231  | BV1mgPczuEN9 |
-| 多组学整合                      | 9:13 | 254  | BV19KPTzKEdo |
+| 主题                            | 时长 | 字幕 | B站 |
+| ------------------------------- | ---- | ---- | --- |
+| 虚拟细胞                        | 9:39 | 295  | [BV1wjAfztECV](https://www.bilibili.com/video/BV1wjAfztECV) |
+| BiOmics：AI生物侦探二人组       | 8:50 | 248  | [BV1fMPwz8EqU](https://www.bilibili.com/video/BV1fMPwz8EqU) |
+| SpatialData：空间组学的通用框架 | 7:42 | 231  | [BV1mgPczuEN9](https://www.bilibili.com/video/BV1mgPczuEN9) |
+| 多组学整合                      | 9:13 | 254  | [BV19KPTzKEdo](https://www.bilibili.com/video/BV19KPTzKEdo) |
 
 ## 前提条件
 
