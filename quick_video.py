@@ -63,6 +63,68 @@ def warn(msg):          print(f"  {Y}  ⚠ {msg}{X}", flush=True)
 def err(msg):           print(f"  {R}  ✗ {msg}{X}", flush=True)
 def info(msg):          print(f"  {D}    {msg}{X}", flush=True)
 
+async def preflight_check() -> bool:
+    """快速连通性预检: 连接 NotebookLM 并列出笔记本，验证认证有效。"""
+    storage = os.environ.get(
+        "NOTEBOOKLM_STORAGE_PATH",
+        str(Path.home() / ".notebooklm" / "storage_state.json"),
+    )
+
+    print(f"\n{B}{'═'*60}{X}")
+    print(f"{B}  PaperTalker-CLI · NotebookLM 连通性检查{X}")
+    print(f"{'═'*60}\n", flush=True)
+
+    # 检查 storage_state.json 是否存在
+    if not Path(storage).exists():
+        err(f"认证文件不存在: {storage}")
+        info("请先运行: python tools/auto_login.py")
+        return False
+
+    # 尝试连接（含自动登录重试）
+    for _login_attempt in range(2):
+        try:
+            client_ctx = await NotebookLMClient.from_storage(storage)
+            break
+        except (ValueError, Exception) as e:
+            if _login_attempt == 0 and ("expired" in str(e).lower() or "authentication" in str(e).lower() or "redirect" in str(e).lower()):
+                warn(f"认证过期，自动重新登录...")
+                import subprocess
+                login_script = str(CLI_DIR / "tools" / "auto_login.py")
+                login_result = subprocess.run(
+                    [sys.executable, login_script],
+                    timeout=360,
+                )
+                if login_result.returncode != 0:
+                    err("自动登录失败，请手动运行: python tools/auto_login.py")
+                    return False
+                ok("自动登录成功，重试连接...")
+                continue
+            err(f"连接失败: {e}")
+            return False
+    else:
+        err("认证重试耗尽")
+        return False
+
+    # 列出笔记本验证 API 可用
+    try:
+        async with client_ctx as client:
+            notebooks = await client.notebooks.list()
+            ok(f"NotebookLM 连接成功!")
+            info(f"当前有 {len(notebooks)} 个笔记本")
+            if notebooks:
+                for nb in notebooks[:5]:
+                    title = getattr(nb, "title", "无标题")
+                    info(f"  · {title}")
+                if len(notebooks) > 5:
+                    info(f"  ... 还有 {len(notebooks)-5} 个")
+    except Exception as e:
+        err(f"API 调用失败: {e}")
+        return False
+
+    print(f"\n{G}  ✅ 预检通过，NotebookLM 已就绪{X}\n")
+    return True
+
+
 def banner(topic, source_mode, style, lang, output):
     print(f"\n{B}{'═'*60}{X}")
     print(f"{B}  PaperTalker-CLI · 一键视频生成{X}")
@@ -142,10 +204,22 @@ async def source_deep_research(client, notebook_id: str, topic: str, mode: str =
     task_id = task.get("task_id")
     ok(f"Research 已启动: task_id={task_id}")
 
-    step(3, 7, "等待 Deep Research 完成...")
-    for i in range(120):
+    step(3, 7, "等待 Deep Research 完成 (最长 20 分钟)...")
+    consecutive_errors = 0
+    for i in range(240):
         await asyncio.sleep(5)
-        result = await client.research.poll(notebook_id)
+        try:
+            result = await client.research.poll(notebook_id)
+            consecutive_errors = 0  # 重置错误计数
+        except Exception as e:
+            consecutive_errors += 1
+            sys.stdout.write(f"\r    轮询 #{i+1}: 网络波动 ({consecutive_errors}/10)，重试中...   ")
+            sys.stdout.flush()
+            if consecutive_errors >= 10:
+                print()
+                err(f"连续 {consecutive_errors} 次网络错误，放弃: {e}")
+                return []
+            continue
         status = result.get("status", "")
         n = len(result.get("sources", []))
         sys.stdout.write(f"\r    轮询 #{i+1}: status={status}, sources={n}   ")
@@ -276,7 +350,28 @@ async def run(
         str(Path.home() / ".notebooklm" / "storage_state.json"),
     )
 
-    async with await NotebookLMClient.from_storage(storage) as client:
+    # 自动登录重试: 认证过期时自动调用 auto_login.py 刷新后重试
+    for _login_attempt in range(2):
+        try:
+            client_ctx = await NotebookLMClient.from_storage(storage)
+            break
+        except (ValueError, Exception) as e:
+            if _login_attempt == 0 and ("expired" in str(e).lower() or "authentication" in str(e).lower() or "redirect" in str(e).lower()):
+                warn(f"认证过期，自动重新登录...")
+                import subprocess
+                login_script = str(CLI_DIR / "tools" / "auto_login.py")
+                login_result = subprocess.run(
+                    [sys.executable, login_script],
+                    timeout=360,
+                )
+                if login_result.returncode != 0:
+                    err("自动登录失败，请手动运行: python tools/auto_login.py")
+                    return None
+                ok("自动登录成功，继续执行...")
+                continue
+            raise
+
+    async with client_ctx as client:
 
         # ── Step 1: 创建笔记本 ────────────────────────────
         step(1, total, "创建 NotebookLM 笔记本...")
@@ -337,7 +432,7 @@ async def run(
         # ── Step 5: 等待来源处理 ──────────────────────────
         step(5, total, "等待来源处理...")
         if imported_count > 0:
-            wait_s = min(30 + imported_count * 3, 90)
+            wait_s = min(30 + imported_count * 5, 180)
             for i in range(wait_s):
                 sys.stdout.write(f"\r    等待中... {i+1}/{wait_s}s")
                 sys.stdout.flush()
@@ -477,7 +572,28 @@ async def resume_video(
         str(Path.home() / ".notebooklm" / "storage_state.json"),
     )
 
-    async with await NotebookLMClient.from_storage(storage) as client:
+    # 自动登录重试
+    for _login_attempt in range(2):
+        try:
+            client_ctx = await NotebookLMClient.from_storage(storage)
+            break
+        except (ValueError, Exception) as e:
+            if _login_attempt == 0 and ("expired" in str(e).lower() or "authentication" in str(e).lower() or "redirect" in str(e).lower()):
+                warn(f"认证过期，自动重新登录...")
+                import subprocess
+                login_script = str(CLI_DIR / "tools" / "auto_login.py")
+                login_result = subprocess.run(
+                    [sys.executable, login_script],
+                    timeout=360,
+                )
+                if login_result.returncode != 0:
+                    err("自动登录失败，请手动运行: python tools/auto_login.py")
+                    return None
+                ok("自动登录成功，继续执行...")
+                continue
+            raise
+
+    async with client_ctx as client:
         step(1, 2, "检查视频状态 (完成即尝试下载)...")
         t0 = time.time()
         safe = "".join(c if c.isalnum() or c in "._- " else "_" for c in topic)[:50]
@@ -599,10 +715,16 @@ def main():
                    help="自定义视频指令 (覆盖 video.md)")
     p.add_argument("--no-confirm", action="store_true",
                    help="跳过阶段确认")
+    p.add_argument("--check", action="store_true",
+                   help="仅检查 NotebookLM 连通性，不生成视频")
     p.add_argument("--resume", nargs=2, metavar=("NOTEBOOK_ID", "TASK_ID"),
                    help="恢复超时的视频生成")
 
     a = p.parse_args()
+
+    if a.check:
+        success = asyncio.run(preflight_check())
+        sys.exit(0 if success else 1)
 
     if a.resume:
         nid, tid = a.resume

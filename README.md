@@ -4,6 +4,7 @@
 
 | 主题                            | 时长 | 字幕 | B站 |
 | ------------------------------- | ---- | ---- | --- |
+| Agent多智能体编排               | 9:35 | 290  | [BV1teNgzBEMH](https://www.bilibili.com/video/BV1teNgzBEMH) |
 | 虚拟细胞                        | 9:39 | 295  | [BV1wjAfztECV](https://www.bilibili.com/video/BV1wjAfztECV) |
 | BiOmics：AI生物侦探二人组       | 8:50 | 248  | [BV1fMPwz8EqU](https://www.bilibili.com/video/BV1fMPwz8EqU) |
 | SpatialData：空间组学的通用框架 | 7:42 | 231  | [BV1mgPczuEN9](https://www.bilibili.com/video/BV1mgPczuEN9) |
@@ -166,8 +167,9 @@ python publish.py
 
 | 问题                 | 解决                                                                                |
 | -------------------- | ----------------------------------------------------------------------------------- |
+| 视频生成网络中断     | 不要重新创建 notebook，用 `--resume NID TID` 恢复轮询，任务在服务端继续运行         |
 | NotebookLM 登录超时  | 确认代理开启且 `.env` 正确；或告诉 Claude `帮我自动认证`                        |
-| 视频生成超时         | 通常 10-20 分钟。超时后用 `--resume` 恢复，或告诉 Claude `视频超时了，帮我恢复` |
+| 视频生成超时         | 通常 10-30 分钟。超时后用 `--resume` 恢复，或告诉 Claude `视频超时了，帮我恢复` |
 | 上传B站失败          | 重新扫码登录 `vendor/biliup.exe login`；确认 biliup >= 1.1.29                     |
 | Windows GBK 编码错误 | 不要用 `conda run`，直接 `conda activate papertalker && python ...`             |
 | macOS 权限错误       | `chmod +x setup/setup.sh`                                                         |

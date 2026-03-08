@@ -18,6 +18,12 @@ Environment:
     PYTHONIOENCODING=utf-8
 """
 
+# MKL env vars must be set before any CTranslate2/faster_whisper import
+import os as _os
+_os.environ.setdefault("MKL_THREADING_LAYER", "sequential")
+_os.environ.setdefault("OMP_NUM_THREADS", "1")
+_os.environ.setdefault("MKL_NUM_THREADS", "1")
+
 import argparse
 import json
 import os
@@ -81,16 +87,74 @@ def make_desc(topic: str, seg_count: int, duration_str: str) -> str:
 
 
 def make_tags(topic: str) -> str:
-    """Generate relevant B站 tags (comma-separated, max 12 tags)."""
-    base_tags = ["AI科研", "学术科普", "论文解读", "前沿研究", "深度解读"]
-    # Add topic-specific tags
+    """Generate self-adaptive B站 tags based on topic content.
+
+    - Detects domain keywords to add relevant field tags
+    - Splits compound topics (与/和/及, spaces, +)
+    - Keeps base tags for discoverability
+    - Max 12 tags, topic first
+    """
+    # Domain keyword -> extra tags mapping
+    DOMAIN_TAGS = {
+        # AI / CS
+        "AI": ["人工智能", "AI技术"],
+        "LLM": ["大语言模型", "AI技术"],
+        "GPT": ["大语言模型", "ChatGPT"],
+        "Claude": ["Anthropic", "AI工具"],
+        "Copilot": ["AI编程", "代码助手"],
+        "Cursor": ["AI编程", "代码助手"],
+        "Code": ["编程", "开发工具"],
+        "Agent": ["AI Agent", "智能体"],
+        "机器学习": ["深度学习", "AI技术"],
+        "深度学习": ["神经网络", "AI技术"],
+        "强化学习": ["AI技术"],
+        "计算机视觉": ["CV", "图像识别"],
+        "自然语言": ["NLP"],
+        "大模型": ["大语言模型", "AI技术"],
+        "Transformer": ["深度学习", "注意力机制"],
+        # Bio / Med
+        "蛋白质": ["生物信息学", "结构生物学"],
+        "基因": ["基因组学", "生物技术"],
+        "药物": ["药物发现", "制药"],
+        "细胞": ["细胞生物学"],
+        "神经": ["神经科学"],
+        "医学": ["医疗AI"],
+        "临床": ["医学研究"],
+        # Physics / Math
+        "量子": ["量子计算", "物理学"],
+        "材料": ["材料科学"],
+        "能源": ["新能源"],
+        # General science
+        "机器人": ["自动化", "智能制造"],
+        "自动驾驶": ["无人驾驶", "智能交通"],
+    }
+
     topic_tags = [topic]
-    # Split topic if it contains common delimiters
-    for sep in ["与", "和", "及"]:
+
+    # Split compound topics
+    for sep in ["与", "和", "及", "+", "&"]:
         if sep in topic:
-            topic_tags.extend(topic.split(sep))
-    all_tags = topic_tags + base_tags
-    # Deduplicate while preserving order, max 12
+            topic_tags.extend(p.strip() for p in topic.split(sep) if p.strip())
+
+    # For English/mixed topics: also split on spaces for multi-word terms
+    words = topic.split()
+    if len(words) >= 2 and any(c.isascii() and c.isalpha() for c in topic):
+        topic_tags.append(topic)  # keep full phrase
+
+    # Match domain keywords
+    domain_extra = []
+    topic_upper = topic.upper()
+    for kw, tags in DOMAIN_TAGS.items():
+        if kw.upper() in topic_upper or kw in topic:
+            domain_extra.extend(tags)
+
+    # Base discoverability tags
+    base_tags = ["AI科研", "学术科普", "论文解读", "前沿研究", "深度解读"]
+
+    # Combine: topic tags -> domain tags -> base tags
+    all_tags = topic_tags + domain_extra + base_tags
+
+    # Deduplicate preserving order, max 12
     seen = set()
     unique = []
     for t in all_tags:
@@ -104,13 +168,27 @@ def make_tags(topic: str) -> str:
 # ── Cover extraction ────────────────────────────────────────
 
 def extract_cover(ffmpeg: str, video_path: Path, cover_path: Path) -> bool:
-    """Extract first frame as cover image (JPEG)."""
+    """Extract first frame from original video as cover image (JPEG).
+
+    Always uses the original (un-subtitled) video to get a clean first frame.
+    Tries multiple FFmpeg approaches for robustness.
+    """
+    # Approach 1: seek to 0 and grab 1 frame
+    result = subprocess.run(
+        [ffmpeg, "-ss", "0", "-i", str(video_path), "-vframes", "1",
+         "-q:v", "2", "-y", str(cover_path)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if result.returncode == 0 and cover_path.exists() and cover_path.stat().st_size > 0:
+        return True
+
+    # Approach 2: without -ss, raw first frame
     result = subprocess.run(
         [ffmpeg, "-i", str(video_path), "-vframes", "1", "-q:v", "2",
          "-y", str(cover_path)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
-    return result.returncode == 0 and cover_path.exists()
+    return result.returncode == 0 and cover_path.exists() and cover_path.stat().st_size > 0
 
 
 # ── Pre-flight ──────────────────────────────────────────────
@@ -146,7 +224,11 @@ def preflight_check() -> bool:
     if COOKIE_FILE.exists():
         print(f"  {G}ok{X}   bilibili cookies")
     else:
-        print(f"  {Y}MISS{X} bilibili cookies (upload will fail)")
+        biliup_exe = PROJECT_ROOT / "vendor" / "biliup.exe"
+        if biliup_exe.exists():
+            print(f"  {Y}MISS{X} bilibili cookies (will auto-login before upload)")
+        else:
+            print(f"  {Y}MISS{X} bilibili cookies (upload will fail)")
 
     print()
     return all_ok
@@ -178,73 +260,94 @@ def extract_audio(ffmpeg: str, video_path: Path, wav_path: Path) -> bool:
 
 
 def transcribe(wav_path: Path) -> list:
-    """Transcribe audio using faster-whisper large-v3 with word-level timestamps.
+    """Transcribe audio using faster-whisper with word-level timestamps.
 
-    Runs in a subprocess to avoid CUDA crash when word_timestamps=True
-    is used inside a function scope on Windows (CTranslate2 bug).
-    Falls back to in-process without word timestamps if subprocess fails.
+    Runs in a dedicated subprocess to isolate GPU/CPU memory.
+    GPU (large-v3 float16) preferred; falls back to CPU (small int8).
     """
     import pickle, tempfile
 
-    # Subprocess script: runs transcription at module level to avoid CUDA bug
-    script = f'''
-import pickle, sys
-from pathlib import Path
+    # Write a standalone transcription script to a temp file
+    # (avoids f-string escaping issues and ensures clean process)
+    script_content = '''
+import os, sys, pickle
+os.environ["MKL_THREADING_LAYER"] = "sequential"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 from faster_whisper import WhisperModel
 
-model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+# Detect GPU availability
+try:
+    import ctranslate2
+    _has_cuda = "cuda" in ctranslate2.get_supported_compute_types("cuda")
+except Exception:
+    _has_cuda = False
+
+_device = "cuda" if _has_cuda else "cpu"
+_ctype = "float16" if _has_cuda else "int8"
+_model = "large-v3" if _has_cuda else "small"
+print(f"  whisper: {_model} on {_device} ({_ctype})", flush=True)
+
+model = WhisperModel(_model, device=_device, compute_type=_ctype)
 segments, info = model.transcribe(
-    {str(wav_path)!r}, language="zh", beam_size=5,
+    sys.argv[1], language="zh", beam_size=5,
     vad_filter=True, vad_parameters=dict(min_silence_duration_ms=500),
     word_timestamps=True,
 )
 seg_list = list(segments)
 
-# Serialize segments as dicts (can't pickle CTranslate2 objects)
 data = []
 for s in seg_list:
-    d = {{"start": s.start, "end": s.end, "text": s.text}}
+    d = {"start": s.start, "end": s.end, "text": s.text}
     if hasattr(s, "words") and s.words:
-        d["words"] = [{{"start": w.start, "end": w.end, "word": w.word}} for w in s.words]
+        d["words"] = [{"start": w.start, "end": w.end, "word": w.word} for w in s.words]
     data.append(d)
 
-with open(sys.argv[1], "wb") as f:
+with open(sys.argv[2], "wb") as f:
     pickle.dump(data, f)
 '''
+    with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w",
+                                     encoding="utf-8") as script_f:
+        script_f.write(script_content)
+        script_path = script_f.name
+
     with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
         pkl_path = tmp.name
 
-    result = subprocess.run(
-        [sys.executable, "-c", script, pkl_path],
-        capture_output=True, text=True, timeout=600,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, script_path, str(wav_path), pkl_path],
+            capture_output=True, text=True, timeout=600,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                 "MKL_THREADING_LAYER": "sequential",
+                 "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+        )
+        # Print subprocess info line (model/device)
+        for line in (result.stdout or "").strip().splitlines():
+            if line.strip().startswith("whisper:"):
+                print(f"\n  {D}  {line.strip()}{X}", end="", flush=True)
 
-    if Path(pkl_path).exists() and Path(pkl_path).stat().st_size > 0:
-        with open(pkl_path, "rb") as f:
-            data = pickle.load(f)
+        if Path(pkl_path).exists() and Path(pkl_path).stat().st_size > 0:
+            with open(pkl_path, "rb") as f:
+                data = pickle.load(f)
+
+            class Seg:
+                def __init__(self, d):
+                    self.start = d["start"]
+                    self.end = d["end"]
+                    self.text = d["text"]
+                    self.words = None
+                    if "words" in d:
+                        self.words = [type("W", (), w) for w in d["words"]]
+            return [Seg(d) for d in data]
+
+        # Subprocess failed — raise with stderr
+        err = (result.stderr or "").strip().split("\n")
+        raise RuntimeError(err[-1] if err else "transcription subprocess failed")
+    finally:
+        Path(script_path).unlink(missing_ok=True)
         Path(pkl_path).unlink(missing_ok=True)
-
-        # Convert dicts back to named-tuple-like objects
-        class Seg:
-            def __init__(self, d):
-                self.start = d["start"]
-                self.end = d["end"]
-                self.text = d["text"]
-                self.words = None
-                if "words" in d:
-                    self.words = [type("W", (), w) for w in d["words"]]
-        return [Seg(d) for d in data]
-
-    # Fallback: in-process without word timestamps
-    Path(pkl_path).unlink(missing_ok=True)
-    from faster_whisper import WhisperModel
-    model = WhisperModel("large-v3", device="cuda", compute_type="float16")
-    segments, seg_info = model.transcribe(
-        str(wav_path), language="zh", beam_size=5,
-        vad_filter=True, vad_parameters=dict(min_silence_duration_ms=500),
-    )
-    return list(segments)
 
 
 def seconds_to_srt(s: float) -> str:
@@ -411,11 +514,64 @@ def burn_subtitles(ffmpeg: str, input_mp4: Path, srt_path: Path, output_mp4: Pat
     return result.returncode == 0
 
 
+def ensure_bilibili_login() -> bool:
+    """Auto-login to Bilibili if cookies are missing.
+
+    Opens a new terminal window running biliup login for QR scan.
+    Waits up to 120s for the cookie file to appear.
+    """
+    if COOKIE_FILE.exists():
+        return True
+
+    biliup_exe = PROJECT_ROOT / "vendor" / "biliup.exe"
+    if not biliup_exe.exists():
+        print(f"  {R}MISS{X} vendor/biliup.exe (cannot auto-login)")
+        return False
+
+    COOKIE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    print(f"  {Y}B站未登录，正在弹出登录窗口...{X}")
+    print(f"  {D}请在弹出的终端中选择「扫码登录」并用B站App扫码{X}")
+
+    # Launch biliup login in a new visible terminal window
+    login_cmd = f'"{biliup_exe}" -u "{COOKIE_FILE}" login'
+    if sys.platform == "win32":
+        subprocess.Popen(
+            f'start "B站登录" cmd /k "{login_cmd}"',
+            shell=True, cwd=str(PROJECT_ROOT / "vendor"),
+        )
+    else:
+        # macOS / Linux
+        for term_cmd in [
+            ["gnome-terminal", "--", "bash", "-c", login_cmd],
+            ["xterm", "-e", login_cmd],
+        ]:
+            try:
+                subprocess.Popen(term_cmd, cwd=str(PROJECT_ROOT / "vendor"))
+                break
+            except FileNotFoundError:
+                continue
+
+    # Wait for cookie file to appear (user scanning QR)
+    import time
+    for i in range(120):
+        if COOKIE_FILE.exists() and COOKIE_FILE.stat().st_size > 10:
+            print(f"  {G}B站登录成功!{X}")
+            return True
+        time.sleep(1)
+        if i % 10 == 9:
+            print(f"  {D}等待扫码... ({i+1}s){X}")
+
+    print(f"  {R}登录超时 (120s){X}")
+    return False
+
+
 def upload_bilibili(video_path: Path, title: str, desc: str, tags: str,
                     cover_path: Path = None) -> dict:
     """Upload video to Bilibili with title, desc, tags, and optional cover."""
     if not COOKIE_FILE.exists():
-        return {"ok": False, "bvid": "", "error": f"Cookie not found: {COOKIE_FILE}"}
+        if not ensure_bilibili_login():
+            return {"ok": False, "bvid": "", "error": "B站未登录"}
 
     try:
         from biliup.plugins.bili_webup import BiliBili, Data

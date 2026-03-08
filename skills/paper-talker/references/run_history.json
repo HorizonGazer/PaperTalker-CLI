@@ -1,1 +1,36 @@
-[]
+[
+  {
+    "date": "2026-03-08T17:08:57.511142",
+    "topic": "Claude Code",
+    "file": "Claude Code_20260308_163428",
+    "subtitles": 273,
+    "duration": "9:47",
+    "title": "【AI科研科普】Claude Code：前沿研究深度解读",
+    "tags": "Claude Code,AI科研,学术科普,论文解读,前沿研究,深度解读",
+    "uploads": {}
+  },
+  {
+    "date": "2026-03-08T18:39:15.272541",
+    "topic": "Agent多智能体编排",
+    "file": "Agent多智能体编排_20260308_181734",
+    "subtitles": 290,
+    "duration": "9:35",
+    "title": "【AI科研科普】Agent多智能体编排：前沿研究深度解读",
+    "tags": "Agent多智能体编排,AI Agent,智能体,AI科研,学术科普,论文解读,前沿研究,深度解读",
+    "uploads": {
+      "bilibili": "ok:BV1teNgzBEMH"
+    }
+  },
+  {
+    "date": "2026-03-08T19:27:49.446519",
+    "topic": "元胞自动机",
+    "file": "元胞自动机_20260308_190437",
+    "subtitles": 267,
+    "duration": "9:26",
+    "title": "【AI科研科普】元胞自动机：前沿研究深度解读",
+    "tags": "元胞自动机,AI科研,学术科普,论文解读,前沿研究,深度解读",
+    "uploads": {
+      "bilibili": "ok:BV1s6NgzeEKt"
+    }
+  }
+]

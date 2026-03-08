@@ -7,9 +7,81 @@ description: "End-to-end academic video production pipeline: research topic to s
 
 End-to-end academic video production: **Research Topic** -> **NotebookLM Video** -> **Subtitles** -> **Multi-Platform Publishing**.
 
+## Automation Principles
+
+**This pipeline is designed for maximum automation. Claude MUST follow these rules:**
+
+1. **ALWAYS run connectivity check first as a SEPARATE command.** Before Phase 1, run `quick_video.py "topic" --check` in its own Bash call with `timeout=120000`. Check the exit code. Only proceed to Phase 1 if exit code is 0. If it fails, notify the user with the error output and do NOT run the full pipeline.
+2. **ALWAYS use `PYTHONUNBUFFERED=1`** in addition to `PYTHONIOENCODING=utf-8` for ALL Python invocations. Without this, output is fully buffered in non-TTY environments and the script appears to hang silently with 0 bytes output.
+3. **Never ask for confirmation before running scripts.** Run `quick_video.py` and `publish.py` directly. These are non-destructive (they only create files in `output/` and `output_subtitled/`).
+4. **Always use `--no-confirm`** when running `quick_video.py` to skip all interactive prompts.
+5. **Auth expired? Auto-handled.** `quick_video.py --check` and `quick_video.py` automatically call `tools/auto_login.py` when NotebookLM auth expires — the user just needs to complete Google login in the popup browser.
+6. **Be patient with long operations.** Deep Research takes 10-20 min; video generation takes 10-30+ min. Total pipeline can exceed 30 minutes. Use `timeout=600000` for Bash calls (use `run_in_background=true` for very long waits). Do NOT interrupt or retry prematurely.
+7. **Network errors are transient — NEVER retry by creating a new notebook.** When `quick_video.py` fails due to network errors mid-pipeline, Claude MUST:
+   - Record the notebook ID (NID) and video task ID (TID) from the script output (printed early in the run)
+   - Use `--resume NID TID` to continue polling the SAME task in the SAME notebook
+   - Do NOT rerun `quick_video.py "TOPIC" --no-confirm` — this creates a duplicate notebook and wastes resources
+   - Wait 2-3 minutes before resuming — the task continues running on Google's servers regardless of client disconnection
+   - Can retry `--resume` multiple times if network keeps dropping — the task ID stays valid for 30 min
+8. **Run Phase 1 then Phase 2 sequentially** without asking. After `quick_video.py` produces a video, immediately run `publish.py` to subtitle and upload.
+9. **Only confirm for truly destructive actions**: deleting user files, modifying account credentials, or force-pushing git. Everything else: just do it.
+
+## Claude Execution Workflow (MANDATORY)
+
+**Claude MUST execute the pipeline in these exact steps. Do NOT skip or combine steps.**
+
+### Step 0: Connectivity Check (SEPARATE Bash call, short timeout)
+
+```bash
+cd "<PROJECT_ROOT>" && PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 "$(conda info --base)/envs/papertalker/python.exe" -u quick_video.py "TOPIC" --check
+```
+- **timeout: 120000** (2 minutes max)
+- If exit code != 0: STOP. Show the error output to the user. Do NOT proceed.
+- If exit code == 0: proceed to Step 1.
+- If auto-login is triggered (browser popup), wait for user to complete Google login.
+
+### Step 1: Generate Video (long-running, background recommended)
+
+```bash
+cd "<PROJECT_ROOT>" && PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 "$(conda info --base)/envs/papertalker/python.exe" -u quick_video.py "TOPIC" --no-confirm
+```
+- **timeout: 600000**. For longer waits, use `run_in_background=true` and check with `TaskOutput`.
+- **CRITICAL: Record NID and TID from output.** The script prints notebook ID (after "笔记本:") and video task ID (after "视频任务:") early in the run. Save these — you need them for `--resume` if the script fails.
+- If exit code is non-zero due to **network errors**: proceed to Step 1b (Resume). Do NOT rerun this command.
+- If exit code is non-zero for **other reasons** (auth, dependency): show output and stop.
+
+### Step 1b: Resume Failed Generation (if Step 1 failed due to network)
+
+If Step 1 failed due to consecutive network errors but the notebook and video task were already submitted:
+
+```bash
+cd "<PROJECT_ROOT>" && PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 "$(conda info --base)/envs/papertalker/python.exe" -u quick_video.py "TOPIC" --resume NID TID
+```
+- Replace `NID` with the notebook ID and `TID` with the video task ID from Step 1 output.
+- **Wait at least 2-3 minutes** before resuming — the task continues on Google's servers regardless of client disconnection.
+- Can retry `--resume` multiple times if network keeps dropping — the task ID stays valid for 30 min.
+- Video generation typically takes 10-30+ minutes total; be patient.
+
+### Step 2: Subtitle + Upload (long-running, separate Bash call)
+
+```bash
+cd "<PROJECT_ROOT>" && PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 "$(conda info --base)/envs/papertalker/python.exe" -u publish.py
+```
+- **timeout: 600000**
+- Check exit code. Report results (BV number, etc.) to user.
+
 ## Pipeline Overview
 
 ```
+ PREFLIGHT (Step 0: quick_video.py --check)
+ ┌──────────────────────────┐
+ │  Verify NotebookLM conn  │
+ │  ├─ Auth file exists?    │
+ │  ├─ Token valid?         │
+ │  ├─ API reachable?       │
+ │  └─ Auto-login if needed │
+ └──────────┬───────────────┘
+            │ exit 0 = ok
  UPSTREAM (Phase 1: quick_video.py)        DOWNSTREAM (Phase 2: publish.py)
  ┌──────────────────────────┐              ┌──────────────────────────────┐
  │  Research Topic           │              │  output/*.mp4                │
@@ -66,7 +138,7 @@ PaperTalker-CLI/
 
 | Component | **Used (Tested)** | Alternative (Not in Pipeline) |
 |-----------|-------------------|-------------------------------|
-| Transcription | `faster-whisper` local GPU (large-v3, word timestamps, subprocess) | Doubao ASR (permission issues) |
+| Transcription | `faster-whisper` GPU preferred (large-v3 float16), CPU fallback (small int8), isolated subprocess | Doubao ASR (permission issues) |
 | Subtitle burn | FFmpeg `subtitles` filter | VectCutAPI (needs manual JianYing export) |
 | Upload | `biliup` library direct import (`vendor/biliup.exe` for login) | — |
 | FFmpeg binary | `imageio-ffmpeg` pip package | `conda install ffmpeg` (GBK crash) |
@@ -83,15 +155,16 @@ PaperTalker-CLI/
 
 ### Running Python
 
-**On Windows, always use direct Python path + UTF-8 encoding.** Never use `conda run` (GBK crash).
+**Both Phase 1 and Phase 2 MUST use the `papertalker` conda environment.** Never use `conda run` (GBK crash).
+
+**CRITICAL: Always set `PYTHONUNBUFFERED=1`** (or use `-u` flag) to prevent silent output buffering in non-TTY environments (subprocess, pipe). Without this, scripts appear to hang with 0 bytes output.
 
 ```bash
-PYTHONIOENCODING=utf-8 "$(conda info --base)/envs/papertalker/python.exe" script.py
-```
+# Preferred: direct Python path + UTF-8 + unbuffered
+PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 "$(conda info --base)/envs/papertalker/python.exe" -u script.py
 
-Or in an activated conda shell:
-```bash
-conda activate papertalker && python script.py
+# Alternative: activate first
+conda activate papertalker && PYTHONUNBUFFERED=1 python -u script.py
 ```
 
 ### Directory Convention
@@ -156,15 +229,21 @@ pip install imageio-ffmpeg faster-whisper jieba "biliup>=1.1.29"
 
 ### Authentication
 
-**NotebookLM** (Google login, interactive):
+**NotebookLM** (auto-handled by `quick_video.py`):
+When auth expires, the script automatically launches `tools/auto_login.py` which opens a browser. The user completes Google login; the script auto-detects completion and saves credentials. No terminal interaction needed.
+
+Manual fallback if auto-login fails:
 ```bash
 conda activate papertalker
-notebooklm login
-# Opens browser -> complete Google login -> press Enter
-# Saved to ~/.notebooklm/storage_state.json
+python tools/auto_login.py
+# Or: notebooklm login
 ```
 
-**Bilibili** (QR scan, interactive, **run in separate terminal**):
+**Bilibili** (auto-handled by `publish.py`):
+When cookies are missing, `publish.py` automatically pops up a new terminal window running `biliup login`.
+The user just scans the QR code with the Bilibili app; the script auto-detects cookie creation and continues.
+
+Manual fallback if auto-login fails:
 ```bash
 cd vendor
 ./biliup.exe -u ../cookies/bilibili/account.json login
@@ -178,19 +257,24 @@ For full setup (Conda install, Tsinghua mirrors, env creation), see [references/
 **Script:** `quick_video.py` — async pipeline using Google NotebookLM.
 
 ```bash
+# Step 0: Connectivity check (MUST run first, separate call)
 conda activate papertalker
-python quick_video.py "虚拟细胞"
+PYTHONUNBUFFERED=1 python -u quick_video.py "虚拟细胞" --check
+
+# Step 1: Generate video (only if Step 0 exits 0)
+PYTHONUNBUFFERED=1 python -u quick_video.py "虚拟细胞" --no-confirm
 ```
 
-### Upstream 7-Step Pipeline
+### Upstream Pipeline
 
 ```
+Step 0: Connectivity check (quick_video.py --check)
 Step 1: Create NotebookLM notebook (title = topic)
 Step 2: Gather sources (based on --source mode)
-Step 3: Stage confirmation (show source list, wait for user)
+Step 3: Auto-confirm and proceed (--no-confirm skips interactive prompts)
 Step 4: Import sources into notebook (batch 15, URL fallback)
-Step 5: Wait for source processing (30s + 3s/source, max 90s)
-Step 6: Generate video (submit task + poll status)
+Step 5: Wait for source processing (30s + 5s/source, max 180s)
+Step 6: Generate video (submit task + poll status, up to 30 min)
 Step 7: Download MP4 to output/{topic}_{timestamp}.mp4
 ```
 
@@ -208,6 +292,7 @@ Step 7: Download MP4 to output/{topic}_{timestamp}.mp4
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `topic` | (required) | Video topic |
+| `--check` | false | Only test NotebookLM connectivity, do not generate video |
 | `--source` | `research` | Source mode: research/search/upload/mixed |
 | `--style` | `whiteboard` | 9 styles: whiteboard, classic, anime, kawaii, watercolor, retro_print, heritage, paper_craft, auto |
 | `--lang` | `zh-CN` | Language code |
@@ -234,7 +319,7 @@ Default prompt enforces strict academic rigor:
 
 ### Output
 
-Videos saved as `output/{sanitized_topic}_{YYYYMMDD_HHMMSS}.mp4`. Generation takes 10-20 min. If timeout, script prints `--resume` command.
+Videos saved as `output/{sanitized_topic}_{YYYYMMDD_HHMMSS}.mp4`. Deep Research takes 10-20 min; video generation takes 10-30+ min. If timeout or network failure, use `--resume NID TID` to continue polling.
 
 ## Phase 2: Post-Production & Publishing (Downstream)
 
@@ -242,12 +327,12 @@ Videos saved as `output/{sanitized_topic}_{YYYYMMDD_HHMMSS}.mp4`. Generation tak
 
 ```bash
 conda activate papertalker
-python publish.py
+PYTHONUNBUFFERED=1 python -u publish.py
 ```
 
 Or with direct path (Windows):
 ```bash
-PYTHONIOENCODING=utf-8 "$(conda info --base)/envs/papertalker/python.exe" publish.py
+PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 "$(conda info --base)/envs/papertalker/python.exe" -u publish.py
 ```
 
 Script options:
@@ -263,8 +348,8 @@ Script options:
 | Step | Action | Details |
 |------|--------|---------|
 | 1 | Extract Audio | FFmpeg -> 16kHz mono WAV |
-| 2 | Extract Cover | First video frame as JPEG (B站 thumbnail) |
-| 3 | Transcribe | faster-whisper large-v3, CUDA GPU, Chinese, VAD filter, word timestamps (subprocess) |
+| 2 | Extract Cover | First frame of **original** (un-subtitled) video as JPEG; dual FFmpeg approach for robustness |
+| 3 | Transcribe | faster-whisper in isolated subprocess; GPU (large-v3 float16) preferred, CPU (small int8) fallback; MKL env vars auto-set |
 | 4 | Generate SRT | Smart chunking: jieba word-aware split, max 18 chars/line, word-level time alignment |
 | 5 | Burn Subtitles | FFmpeg subtitles filter (Microsoft YaHei, white + black outline, MarginV=30) |
 | 6 | Upload | Auto-generated title/desc/tags, cover image, per platform |
@@ -277,8 +362,10 @@ The script auto-generates B站-optimized metadata from the filename:
 - **Topic extraction**: `虚拟细胞_20260303_223817.mp4` -> `虚拟细胞` (strip `_YYYYMMDD_HHMMSS`)
 - **Title**: `【AI科研科普】{topic}：前沿研究深度解读` (max 80 chars)
 - **Description**: Topic + duration + subtitle count + hashtags (max 250 chars)
-- **Tags**: `{topic},AI科研,学术科普,论文解读,前沿研究,深度解读` (max 12, topic split at 与/和/及)
-- **Cover**: First frame of video as JPEG
+- **Tags**: Self-adaptive based on topic content. Domain keyword detection (AI/Bio/Physics/etc.) adds relevant field tags. Splits compound topics (与/和/及/+/&). Max 12 tags.
+  - Example: `Claude Code` -> `Claude Code,Anthropic,AI工具,编程,开发工具,AI科研,...`
+  - Example: `蛋白质折叠与药物发现` -> `蛋白质折叠与药物发现,蛋白质折叠,药物发现,生物信息学,...`
+- **Cover**: First frame of **original** (un-subtitled) video as JPEG; dual FFmpeg approach for robustness
 - **Category**: tid=201 (科学科普)
 
 ### Subtitle Smart Chunking
@@ -331,16 +418,19 @@ See [references/known_issues.md](references/known_issues.md) for full list. Crit
 
 | Issue | Fix |
 |-------|-----|
+| Python output buffering (0 bytes in subprocess) | `PYTHONUNBUFFERED=1` + `-u` flag for all invocations |
 | `conda run` GBK crash | Direct Python path + `PYTHONIOENCODING=utf-8` |
 | `conda install ffmpeg` fails | `pip install imageio-ffmpeg` |
 | FFmpeg subtitle Windows paths | `path.replace('\\','/').replace(':','\\:')` |
 | CUDA crash with `word_timestamps=True` in function scope | Subprocess transcribe (auto in publish.py) |
+| MKL `mkl_malloc` memory failure on CPU | Set `MKL_THREADING_LAYER=sequential`, `OMP_NUM_THREADS=1` before import; use `small` model on CPU |
+| biliup login interactive | Auto-handled: `publish.py` pops up login terminal when cookies missing |
 | Playwright chromium version mismatch | `python -m playwright install chromium` (or upgrade playwright to match existing browser) |
-| NotebookLM auth expired | `notebooklm login` (interactive, needs browser + proxy) |
+| Network errors during video generation | Do NOT create a new notebook. Record NID+TID from output, wait 2-3 min, then `--resume NID TID` |
+| NotebookLM auth expired | Auto-handled: `quick_video.py` calls `tools/auto_login.py` automatically |
 | Doubao ASR 45000030 permission | Use `faster-whisper` local GPU instead |
 | biliup < 1.0 blocked (21590) | `pip install "biliup>=1.1.29"` |
 | `login_by_cookies` KeyError | Pass full `account` dict, NOT `account['cookie_info']` |
-| biliup login interactive | Run `biliup.exe login` in separate terminal |
 
 ## Progress Display
 
