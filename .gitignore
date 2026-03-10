@@ -70,6 +70,7 @@ desktop.ini
 
 # Logs
 *.log
+run_history.txt
 
 # Temporary files
 *.tmp

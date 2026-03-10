@@ -2,6 +2,17 @@
 
 ## Subtitle Segmentation Issues
 
+### Whisper produces duplicate consecutive segments
+
+**Symptom:** Subtitles contain repeated text — the same sentence appears twice in a row, causing visual duplication in the burned video.
+
+**Cause:** Whisper (especially with VAD filter) can produce overlapping segments with identical or near-identical text. This is a known upstream artifact.
+
+**Fix (2026-03-09):** Added `deduplicate_segments()` in publish.py (after transcription, before SRT generation):
+- Exact duplicates: merges timing, keeps one copy
+- Near-duplicates (one text is a substring of the other): keeps the longer text, merges timing
+- Logs how many duplicates were removed (e.g., `210 segments, 9:39, 5 duplicates removed`)
+
 ### Subtitles split mid-word (e.g. "活" / "生生的细胞")
 
 **Symptom:** Hard character-count splits break Chinese words unnaturally.
@@ -204,10 +215,33 @@ bili.login_by_cookies(account)  # NOT account['cookie_info']
 
 **Symptom:** Cannot complete login from Claude CLI (arrow key menu).
 
-**Fix:** Run in a separate terminal:
+**Fix (2026-03-09):** `publish.py` now uses Bilibili's TV QR login API directly via Python — no interactive menu needed. The QR code is rendered in the terminal via `qrcode` library. User just scans with Bilibili App.
+
+If the Python API fails, falls back to launching `biliup.exe login` via a temp `.bat` file in a new terminal window.
+
+Manual fallback if both fail:
 ```bash
 cd vendor
 ./biliup.exe -u ../cookies/bilibili/account.json login
+```
+
+### biliup.exe login not triggered on Windows (nested-quote bug)
+
+**Symptom:** `publish.py` opens a terminal window for Bilibili login, but `biliup.exe` does not actually execute. The window opens blank or closes immediately. Cookies are never created, so upload fails.
+
+**Cause:** The original `start "title" cmd /k "..."` command contained nested double quotes that Windows cmd cannot parse:
+```
+start "B站登录" cmd /k ""C:\...\biliup.exe" -u "C:\...\account.json" login"
+```
+The inner quotes confuse cmd, causing the command to silently fail.
+
+**Fix (2026-03-09):** `ensure_bilibili_login()` now writes a temporary `.bat` file (`vendor/_bilibili_login.bat`) containing the login command, then launches it with `start "B站登录" cmd /c "path\to\_bilibili_login.bat"`. The `.bat` file is cleaned up after login completes or times out. This eliminates all nested-quote issues.
+
+The `.bat` also shows clear instructions to the user:
+```
+========================================
+   B站登录 - 请选择「扫码登录」
+========================================
 ```
 
 ### biliup version requirement
@@ -232,3 +266,107 @@ cd vendor
 ### `quick_validate.py` GBK UnicodeDecodeError
 
 **Fix:** Already patched — `encoding='utf-8'` added to `skill_md.read_text()`.
+
+## WeChat Channels (视频号) Upload Issues
+
+### Wujie iframe becomes empty after video upload
+
+**Symptom:** After uploading video via file chooser, the wujie iframe (`/micro/content/post/create`) exists but contains no form elements. All locators return 0 results.
+
+**Cause:** Wujie micro-frontend framework may clear iframe content after upload completes, exposing elements to the main page instead.
+
+**Fix (2026-03-10):** `upload_weixin_channels()` checks if iframe has elements after upload. If `input[placeholder*="概括"]` count is 0, automatically switches to main page for form filling.
+
+```python
+short_title_test = upload_frame.locator('input[placeholder*="概括"]')
+if short_title_test.count() == 0 and hasattr(upload_frame, 'url'):
+    upload_frame = page  # Use main page instead
+```
+
+### Upload completion detection
+
+**Symptom:** Script waits 180s for upload to complete but doesn't detect when video is ready.
+
+**Fix (2026-03-10):** Check multiple indicators:
+1. `video` element appears
+2. "删除" button appears
+3. Short title input becomes enabled (not disabled)
+
+### Description field is contenteditable div, not textarea
+
+**Symptom:** Standard `textarea` or `input` selectors don't find the description field.
+
+**Fix (2026-03-10):** Description is `<div contenteditable="" data-placeholder="添加描述" class="input-editor"></div>`. Use:
+```python
+desc_elem = upload_frame.locator('div.input-editor[contenteditable][data-placeholder="添加描述"]')
+desc_elem.evaluate(f'el => el.innerText = {repr(text)}')
+```
+
+### Short title max length
+
+**Symptom:** WeChat Channels rejects titles longer than 30 characters.
+
+**Fix:** `upload_weixin_channels()` automatically truncates to 16 characters (safe limit for Chinese).
+
+### Proxy causes HTTP errors on Chinese sites
+
+**Symptom:** `net::ERR_HTTP_RESPONSE_CODE_FAILURE` when accessing `channels.weixin.qq.com`.
+
+**Fix (2026-03-10):** Add `--no-proxy-server` to browser launch args:
+```python
+context = p.chromium.launch_persistent_context(
+    args=["--disable-blink-features=AutomationControlled", "--no-proxy-server"],
+    ...
+)
+```
+
+### Publish button stays disabled after upload
+
+**Symptom:** Video uploads to WeChat Channels but the publish button remains disabled (`weui-desktop-btn_disabled` class). Both publish and draft buttons are unusable.
+
+**Cause:** Two issues:
+1. Upload completion detection only checked iframe, but after Wujie micro-frontend switch, elements move to main page
+2. Video server-side processing takes time after upload completes. Previous code only waited 2 seconds before checking
+
+**Fix (2026-03-10):**
+1. Upload detection now checks both iframe AND main page for `<video>` element / `删除` button
+2. Upload timeout increased from 180s to 300s (5 min) for large videos
+3. Publish button polling: waits up to 180s (3 min) with 5s intervals for button to become enabled
+4. Added debug screenshot + detailed logging when button stays disabled
+
+### Bilibili TV QR API returns empty response
+
+**Symptom:** `Expecting value: line 1 column 1 (char 0)` when calling Bilibili TV QR login API.
+
+**Cause:** Proxy may intercept/block the passport.bilibili.com API, or API endpoint changed.
+
+**Fix (2026-03-10):** Added 3-retry loop with 10s timeout. Falls back to biliup.exe `.bat` launcher which requires user to scan QR code in a terminal window.
+
+## ASR / Transcription Issues
+
+### Whisper outputs Traditional Chinese characters
+
+**Symptom:** Subtitles contain Traditional Chinese (繁体字) instead of Simplified Chinese.
+
+**Fix (2026-03-10):** Two-layer approach:
+1. Added `initial_prompt="以下是普通话的句子，使用简体中文。"` to Whisper transcribe call to guide the model
+2. Post-transcription Traditional-to-Simplified conversion via embedded `str.maketrans()` table (~200+ character mappings). Applied to both segment text and word text. No external dependencies (avoids `opencc` installation issues behind proxy).
+
+### Playwright sync_api event loop conflict
+
+**Symptom:** `RuntimeError: This event loop is already running` when calling `sync_playwright()` after other async-capable libraries (faster-whisper, etc.) have been imported.
+
+**Cause:** Playwright's sync API wraps async calls with `loop.run_until_complete()`. If the process's asyncio event loop is in an inconsistent state (from prior imports or subprocess mechanisms), this fails.
+
+**Fix (2026-03-10):** WeChat Channels upload runs in a separate subprocess (`_weixin_upload_worker.py`) using Playwright's **async API** directly with `asyncio.run()`. This gives a completely clean event loop. The main process communicates results via a temp JSON file.
+
+### WeChat login false positive from transient URL change
+
+**Symptom:** Login detected as successful but page redirects back to `login.html`. All subsequent navigation to create page fails, file input not found.
+
+**Cause:** During QR scan authentication, the URL may briefly change (triggering `"login" not in url` check) then redirect back to `login.html` if the session wasn't fully established.
+
+**Fix (2026-03-10):** Two-layer login verification:
+1. After URL changes away from "login", wait 3s and re-check to confirm URL is stable
+2. After all navigation attempts, verify final URL is NOT on login page — abort with clear error if stuck
+3. Body text check removed (login page HTML contains dashboard keywords)

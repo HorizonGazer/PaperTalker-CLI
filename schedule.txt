@@ -1,0 +1,31 @@
+# PaperTalker Schedule (Tab-Separated Format)
+# Columns: date	topic	source_mode	platforms	max_results	status	completed_at	notes
+#
+# Column Descriptions:
+#   date         - YYYY-MM-DD format, or "queue" for FIFO queue items
+#   topic        - Research topic or paper title
+#   source_mode  - research|search|file|paper (default: research)
+#   platforms    - Comma-separated: bilibili,douyin,weixin_channels,weixin_article,xiaohongshu,kuaishou (default: bilibili)
+#   max_results  - Max papers to fetch (default: 5)
+#   status       - pending|completed|failed
+#   completed_at - ISO timestamp when completed (auto-filled)
+#   notes        - Optional notes or error messages
+#
+# Legal Values:
+#   date: YYYY-MM-DD or "queue"
+#   source_mode: research, search, file, paper
+#   platforms: bilibili, douyin, weixin_channels, weixin_article, xiaohongshu, kuaishou (comma-separated, no spaces)
+#   max_results: positive integer (1-50)
+#   status: pending, completed, failed
+#
+# Examples:
+#   2026-03-10	蛋白质折叠	search	bilibili	5	pending
+#   queue	单细胞测序	research	bilibili,weixin_channels	5	pending
+#   2026-03-08	CRISPR 2025	research	bilibili	5	completed	2026-03-08T09:15:32
+#
+# ────────────────────────────────────────────────────────────────────────────
+
+2026-03-10	蛋白质折叠	search	bilibili	5	pending		
+queue	单细胞测序	research	bilibili,weixin_channels	5	pending
+queue	LLM Agent	research	bilibili,weixin_channels	5	pending
+queue	CRISPR 2025	research	bilibili,weixin_channels	5	pending		

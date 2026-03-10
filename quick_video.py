@@ -7,16 +7,20 @@ PaperTalker-CLI · quick_video.py — 一键主题→视频 (独立版)
     python quick_video.py "蛋白质折叠" --source search --platforms arxiv pubmed --year 2024
     python quick_video.py "量子计算" --source upload
     python quick_video.py "LLM药物发现" --source search --style anime --no-confirm
+    python quick_video.py "Attention机制" --source file --files paper.pdf
+    python quick_video.py "Transformer" --source paper
 
 来源模式 (--source):
     research   Deep Research 自动搜索网络资料（默认）
     search     paper-search-mcp 论文检索，支持 --platforms / --year / --max-results
     upload     打开 NotebookLM 笔记本页面，用户手动上传文件后继续
     mixed      先 Deep Research，再补充论文检索
+    file       导入本地文件（PDF/txt/md/docx），需配合 --files 参数
+    paper      按标题搜索论文，列出候选让用户选择后导入
 
 流程:
     1. 创建笔记本
-    2. 获取来源（research / search / upload / mixed）
+    2. 获取来源（research / search / upload / mixed / file / paper）
     3. 阶段性确认：展示来源列表，用户确认后继续
     4. 等待来源处理
     5. 生成视频
@@ -56,6 +60,9 @@ from notebooklm.exceptions import ArtifactParseError
 
 # ── 颜色 / 日志 ──────────────────────────────────────────
 G = "\033[92m"; Y = "\033[93m"; R = "\033[91m"; C = "\033[96m"; B = "\033[1m"; D = "\033[2m"; X = "\033[0m"
+
+# 可导入 NotebookLM 的文件类型
+IMPORTABLE_EXTS = {".pdf", ".txt", ".md", ".docx"}
 
 def step(i, n, msg):   print(f"  {C}[{i}/{n}]{X} {msg}", flush=True)
 def ok(msg):            print(f"  {G}  ✓ {msg}{X}", flush=True)
@@ -278,6 +285,113 @@ async def source_upload(client, notebook_id: str) -> list[dict]:
     return result
 
 
+async def source_local_files(client, notebook_id: str, paths: list[str]) -> list[dict]:
+    """导入本地文件（PDF/txt/md/docx）到 NotebookLM。
+
+    paths 可以是文件路径或目录路径（自动递归扫描）。
+    直接调用 client.sources.add_file()，无需再经过 import_sources()。
+    """
+    # 收集所有待导入文件
+    files = []
+    for p_str in paths:
+        p = Path(p_str).resolve()
+        if p.is_dir():
+            for f in sorted(p.rglob("*")):
+                if f.is_file() and f.suffix.lower() in IMPORTABLE_EXTS:
+                    files.append(f)
+        elif p.is_file():
+            if p.suffix.lower() in IMPORTABLE_EXTS:
+                files.append(p)
+            else:
+                warn(f"不支持的文件类型: {p.name} (支持: {', '.join(IMPORTABLE_EXTS)})")
+        else:
+            warn(f"路径不存在: {p_str}")
+
+    if not files:
+        err("没有找到可导入的文件")
+        return []
+
+    # 去重
+    files = list(dict.fromkeys(files))
+
+    step(2, 7, f"准备导入 {len(files)} 个本地文件...")
+    for i, f in enumerate(files, 1):
+        size_kb = f.stat().st_size / 1024
+        info(f"{i:>3}. {f.name} ({size_kb:.0f} KB)")
+
+    step(3, 7, f"上传文件到 NotebookLM...")
+    imported = []
+    for i, f in enumerate(files, 1):
+        try:
+            src = await client.sources.add_file(notebook_id, str(f))
+            imported.append({
+                "title": f.stem,
+                "url": "",
+                "source": "file",
+                "id": getattr(src, "id", ""),
+            })
+            sys.stdout.write(f"\r    已上传 {i}/{len(files)}: {f.name}")
+            sys.stdout.flush()
+        except Exception as e:
+            print()
+            warn(f"上传失败 [{f.name}]: {e}")
+    if imported:
+        print()
+    ok(f"成功导入 {len(imported)}/{len(files)} 个文件")
+    return imported
+
+
+async def source_paper_title(
+    client, notebook_id: str, topic: str,
+    platforms: list[str], max_results: int, no_confirm: bool = False,
+) -> list[dict]:
+    """按论文标题搜索，列出候选让用户选择后导入。"""
+    from paper_search import search_papers
+    step(2, 7, f"搜索论文: '{topic}' on {platforms}...")
+    t0 = time.time()
+    papers = await search_papers(topic, platforms=platforms, max_results=max_results)
+    ok(f"搜索完成: {len(papers)} 篇论文  ({time.time()-t0:.1f}s)")
+
+    if not papers:
+        warn("没有找到相关论文")
+        return []
+
+    print_sources_table(papers, "搜索结果")
+
+    # 让用户选择
+    if no_confirm:
+        info("自动全选 (--no-confirm)")
+        selected_indices = list(range(len(papers)))
+    else:
+        try:
+            ans = input(f"  {Y}  选择论文编号 (逗号分隔, 'all' 全选, Enter 跳过): {X}").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return []
+
+        if not ans:
+            info("已跳过")
+            return []
+        elif ans.lower() == "all":
+            selected_indices = list(range(len(papers)))
+        else:
+            selected_indices = []
+            for part in ans.split(","):
+                part = part.strip()
+                if part.isdigit():
+                    idx = int(part) - 1  # 从 1 开始
+                    if 0 <= idx < len(papers):
+                        selected_indices.append(idx)
+
+    if not selected_indices:
+        warn("没有选择任何论文")
+        return []
+
+    selected = [papers[i] for i in selected_indices]
+    ok(f"已选择 {len(selected)} 篇论文")
+    return selected
+
+
 # ══════════════════════════════════════════════════════════
 #  导入来源到笔记本
 # ══════════════════════════════════════════════════════════
@@ -336,6 +450,7 @@ async def run(
     timeout: float = 1800.0,
     instructions: str | None = None,
     no_confirm: bool = False,
+    file_paths: list[str] | None = None,
 ):
     total = 7
     out = Path(output_dir).resolve()
@@ -400,10 +515,24 @@ async def run(
         if source_mode == "upload":
             discovered = await source_upload(client, nid)
 
+        if source_mode == "file":
+            if not file_paths:
+                err("--source file 需要 --files 参数指定文件路径")
+                return None
+            discovered = await source_local_files(client, nid, file_paths)
+
+        if source_mode == "paper":
+            discovered = await source_paper_title(
+                client, nid, topic,
+                platforms or ["arxiv", "semantic_scholar"],
+                max_results, no_confirm,
+            )
+
         # ── 阶段确认 ─────────────────────────────────────
         print_sources_table(discovered, "发现的来源")
 
-        if source_mode == "upload":
+        if source_mode in ("upload", "file"):
+            # upload/file 模式下文件已导入，无需再调用 import_sources
             if not confirm(f"笔记本中有 {len(discovered)} 个来源，继续生成视频?", no_confirm):
                 print(f"\n  {Y}已取消{X}\n")
                 return None
@@ -691,12 +820,16 @@ def main():
   python quick_video.py "蛋白质折叠" --source search --platforms arxiv pubmed --year 2024
   python quick_video.py "量子计算" --source upload
   python quick_video.py "LLM" --source mixed --style anime --no-confirm
+  python quick_video.py "Attention" --source file --files paper.pdf ./more_papers/
+  python quick_video.py "Transformer" --source paper --platforms arxiv
         """,
     )
     p.add_argument("topic", help="视频主题")
     p.add_argument("--source", default="research",
-                   choices=["research", "search", "upload", "mixed"],
+                   choices=["research", "search", "upload", "mixed", "file", "paper"],
                    help="来源模式 (默认: research)")
+    p.add_argument("--files", nargs="+", default=None,
+                   help="本地文件或目录路径 (用于 --source file)")
     p.add_argument("--style", default="whiteboard", choices=list(STYLE_MAP.keys()),
                    help="视频风格 (默认: whiteboard)")
     p.add_argument("--lang", default="zh-CN", help="语言 (默认: zh-CN)")
@@ -739,6 +872,7 @@ def main():
         language=a.lang, research_mode=a.mode, platforms=a.platforms,
         max_results=a.max_results, year=a.year, output_dir=a.output,
         timeout=a.timeout, instructions=a.instructions, no_confirm=a.no_confirm,
+        file_paths=a.files,
     ))
     sys.exit(0 if result else 1)
 
