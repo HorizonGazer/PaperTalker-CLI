@@ -203,7 +203,7 @@ def print_sources_table(sources: list[dict], label: str = "来源"):
 async def source_deep_research(client, notebook_id: str, topic: str, mode: str = "deep") -> list[dict]:
     """Deep Research: 启动 → 轮询 → 返回发现的来源。
 
-    如果 Deep Research 失败（速率限制等），自动降级到 Fast Research。
+    如果 Deep Research 失败（速率限制等），提示用户切换账号或自动降级到 Fast Research。
     """
     step(2, 7, f"启动 Deep Research ({mode})...")
     t0 = time.time()
@@ -216,10 +216,51 @@ async def source_deep_research(client, notebook_id: str, topic: str, mode: str =
         if "rate" in error_msg or "limit" in error_msg or "quota" in error_msg or "429" in error_msg:
             if mode == "deep":
                 warn(f"Deep Research 被限流: {e}")
-                warn("自动降级到 Fast Research...")
-                return await source_deep_research(client, notebook_id, topic, mode="fast")
+                print()
+                print(f"  {'='*60}")
+                print(f"  {Y}检测到 Deep Research 速率限制{X}")
+                print(f"  ")
+                print(f"  可选方案:")
+                print(f"    1. 切换 Google 账号（重新登录 NotebookLM）")
+                print(f"    2. 自动降级到 Fast Research（速度更快，质量略低）")
+                print(f"    3. 使用论文搜索模式（--source search）")
+                print(f"  {'='*60}")
+                print()
+
+                # 询问用户
+                response = input(f"  是否切换账号？(y/N): ").strip().lower()
+                if response in ['y', 'yes', '是']:
+                    print(f"\n  {Y}正在重新登录 NotebookLM...{X}")
+                    # 删除旧的认证文件
+                    auth_file = Path.home() / ".notebooklm" / "storage_state.json"
+                    if auth_file.exists():
+                        auth_file.unlink()
+                        print(f"  {G}✓ 已清除旧账号缓存{X}")
+
+                    # 调用自动登录
+                    import subprocess
+                    auto_login_script = CLI_DIR / "tools" / "auto_login.py"
+                    if auto_login_script.exists():
+                        result = subprocess.run(
+                            [sys.executable, str(auto_login_script)],
+                            capture_output=False
+                        )
+                        if result.returncode == 0:
+                            print(f"  {G}✓ 账号切换成功，请重新运行脚本{X}")
+                            sys.exit(0)
+                        else:
+                            err("账号切换失败")
+                            return []
+                    else:
+                        err(f"找不到自动登录脚本: {auto_login_script}")
+                        return []
+                else:
+                    warn("自动降级到 Fast Research...")
+                    return await source_deep_research(client, notebook_id, topic, mode="fast")
             else:
                 err(f"Fast Research 也被限流: {e}")
+                print(f"\n  {Y}建议切换 Google 账号后重试{X}")
+                print(f"  运行: python tools/auto_login.py")
                 return []
         else:
             err(f"Deep Research 启动失败: {e}")
