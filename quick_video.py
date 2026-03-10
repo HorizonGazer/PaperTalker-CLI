@@ -201,13 +201,38 @@ def print_sources_table(sources: list[dict], label: str = "来源"):
 # ══════════════════════════════════════════════════════════
 
 async def source_deep_research(client, notebook_id: str, topic: str, mode: str = "deep") -> list[dict]:
-    """Deep Research: 启动 → 轮询 → 返回发现的来源。"""
+    """Deep Research: 启动 → 轮询 → 返回发现的来源。
+
+    如果 Deep Research 失败（速率限制等），自动降级到 Fast Research。
+    """
     step(2, 7, f"启动 Deep Research ({mode})...")
     t0 = time.time()
-    task = await client.research.start(notebook_id, query=topic, source="web", mode=mode)
+
+    try:
+        task = await client.research.start(notebook_id, query=topic, source="web", mode=mode)
+    except Exception as e:
+        error_msg = str(e).lower()
+        # 检测速率限制错误
+        if "rate" in error_msg or "limit" in error_msg or "quota" in error_msg or "429" in error_msg:
+            if mode == "deep":
+                warn(f"Deep Research 被限流: {e}")
+                warn("自动降级到 Fast Research...")
+                return await source_deep_research(client, notebook_id, topic, mode="fast")
+            else:
+                err(f"Fast Research 也被限流: {e}")
+                return []
+        else:
+            err(f"Deep Research 启动失败: {e}")
+            return []
+
     if not task:
-        err("Deep Research 启动失败")
-        return []
+        if mode == "deep":
+            warn("Deep Research 启动失败，尝试降级到 Fast Research...")
+            return await source_deep_research(client, notebook_id, topic, mode="fast")
+        else:
+            err("Fast Research 启动失败")
+            return []
+
     task_id = task.get("task_id")
     ok(f"Research 已启动: task_id={task_id}")
 
@@ -250,7 +275,7 @@ async def source_deep_research(client, notebook_id: str, topic: str, mode: str =
 
 async def source_paper_search(topic: str, platforms: list[str], max_results: int, year: int | None) -> list[dict]:
     """paper-search-mcp 论文检索。"""
-    from paper_search import search_papers
+    from src.utils.paper_search import search_papers
     step(2, 7, f"搜索论文: platforms={platforms}, max={max_results}, year={year or 'any'}...")
     t0 = time.time()
     papers = await search_papers(topic, platforms=platforms, max_results=max_results, year=year)
@@ -346,7 +371,7 @@ async def source_paper_title(
     platforms: list[str], max_results: int, no_confirm: bool = False,
 ) -> list[dict]:
     """按论文标题搜索，列出候选让用户选择后导入。"""
-    from paper_search import search_papers
+    from src.utils.paper_search import search_papers
     step(2, 7, f"搜索论文: '{topic}' on {platforms}...")
     t0 = time.time()
     papers = await search_papers(topic, platforms=platforms, max_results=max_results)
