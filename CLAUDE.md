@@ -4,6 +4,8 @@ End-to-end academic video production: Research Topic -> NotebookLM Video -> Subt
 
 ## Quick Reference
 
+### Full Pipeline
+
 | Command | Description |
 |---------|-------------|
 | `python quick_video.py "主题" --check` | Step 0: Verify NotebookLM connectivity (MUST run first) |
@@ -15,6 +17,15 @@ End-to-end academic video production: Research Topic -> NotebookLM Video -> Subt
 | `python publish.py --skip-upload` | Subtitle only, no upload |
 | `python run_scheduled.py` | Run today's scheduled topic (from schedule.txt) |
 | `python setup_cron.py --execute` | Register OpenClaw daily cron job |
+
+### Modular Scripts (按需调用)
+
+| Script | Description | Example |
+|--------|-------------|---------|
+| `src/transcribe.py` | Audio transcription (extract + Whisper + SRT) | `python src/transcribe.py video.mp4` |
+| `src/subtitle.py` | Burn SRT subtitles into video | `python src/subtitle.py video.mp4 subs.srt` |
+| `src/upload_bilibili.py` | Upload to Bilibili with metadata | `python src/upload_bilibili.py video.mp4 --title "标题" --tags "tag1,tag2"` |
+| `src/upload_weixin.py` | Upload to WeChat Channels | `python src/upload_weixin.py video.mp4 --title "标题" --desc "描述"` |
 
 ## Running Python (Windows)
 
@@ -30,13 +41,20 @@ Or activate first: `conda activate papertalker && PYTHONUNBUFFERED=1 python -u s
 
 ```
 quick_video.py              # Phase 1: topic -> NotebookLM video (async)
-publish.py                  # Phase 2: subtitle + upload (canonical copy)
-_weixin_upload_worker.py    # WeChat Channels upload subprocess (async Playwright)
-paper_search.py             # Multi-platform paper search wrapper
-video.md                    # Video generation prompt (strict academic rigor)
-schedule.txt                # Daily schedule: date-bound topics + FIFO queue
+publish.py                  # Phase 2: subtitle + upload (orchestrator)
 run_scheduled.py            # Cron entry point: pick topic -> Phase 1 -> Phase 2
 setup_cron.py               # OpenClaw cron registration helper
+video.md                    # Video generation prompt (strict academic rigor)
+schedule.txt                # Daily schedule: date-bound topics + FIFO queue
+src/                        # Source modules
+  transcribe.py             # Standalone: audio extraction + Whisper transcription + SRT generation
+  subtitle.py               # Standalone: burn SRT subtitles into video
+  upload_bilibili.py        # Standalone: Bilibili upload with metadata
+  upload_weixin.py          # Standalone: WeChat Channels upload
+  workers/
+    weixin_upload_worker.py # WeChat Channels upload subprocess (async Playwright, legacy)
+  utils/
+    paper_search.py         # Multi-platform paper search wrapper
 setup/                      # One-click installers (setup.bat, setup.sh, etc.)
 tools/                      # Utility scripts (auto_login.py, verify.py)
 cookies/bilibili/           # Bilibili auth (account.json)
@@ -62,7 +80,8 @@ Full pipeline documentation is in `skills/paper-talker/SKILL.md`. This is the au
 | FFmpeg subtitle Windows paths | `path.replace('\\','/').replace(':','\\:')` |
 | `conda install ffmpeg` fails | Use `pip install imageio-ffmpeg` |
 | Playwright sync_api event loop conflict | Use async API in subprocess (`_weixin_upload_worker.py`) + `nest_asyncio` |
-| WeChat 视频号 login false positive | URL stability check (3s re-verify after URL change) |
+| WeChat 视频号 login detection | Direct navigate to `post/create`. Poll every 0.5s for URL change from `login` to `post/create` (WeChat auto-redirects) |
+| WeChat 视频号 publish button | Try 3 click methods. Wait for URL redirect to `post/list`. Keep browser open 35s after publish |
 | WeChat 视频号 short title < 6 chars | Auto-pad with "—视频解读" to meet minimum |
 
 ## Environment

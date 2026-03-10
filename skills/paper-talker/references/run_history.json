@@ -204,5 +204,31 @@
     "uploads": {
       "weixin_channels": "ok"
     }
+  },
+  {
+    "date": "2026-03-10T19:31:52.018875",
+    "topic": "The Virtual Lab of AI agents designs new SARS-CoV-",
+    "file": "The Virtual Lab of AI agents designs new SARS-CoV-_20260310_185353",
+    "subtitles": 465,
+    "duration": "11:43",
+    "title": "【AI科研科普】The Virtual Lab of AI agents designs new SARS-CoV-：前沿研究深度解读",
+    "tags": "The Virtual Lab of AI agents designs new SARS-CoV-,人工智能,AI技术,AI Agent,智能体,AI科研,学术科普,论文解读,前沿研究,深度解读",
+    "uploads": {
+      "bilibili": "FAIL:{'code': 21005, 'message': 'Tag不能为空，总数量不能超过12个， 并且单个不能超过20个字', 'ttl': 1}",
+      "weixin_channels": "ok"
+    }
+  },
+  {
+    "date": "2026-03-10T19:41:52.871944",
+    "topic": "The Virtual Lab of AI agents designs new SARS-CoV-",
+    "file": "The Virtual Lab of AI agents designs new SARS-CoV-_20260310_185353",
+    "subtitles": 465,
+    "duration": "11:43",
+    "title": "【AI科研科普】The Virtual Lab of AI agents designs new SARS-CoV-：前沿研究深度解读",
+    "tags": "The Virtual Lab of A,人工智能,AI技术,AI Agent,智能体,AI科研,学术科普,论文解读,前沿研究,深度解读",
+    "uploads": {
+      "bilibili": "ok:BV1qBcXzcE16",
+      "weixin_channels": "ok"
+    }
   }
 ]

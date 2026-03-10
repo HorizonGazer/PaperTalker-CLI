@@ -34,7 +34,7 @@ End-to-end academic video production: **Research Topic** -> **NotebookLM Video**
 9. **Only confirm for truly destructive actions**: deleting user files, modifying account credentials, or force-pushing git. Everything else: just do it.
 10. **Bilibili login is fully automated.** `publish.py` handles login via Python API — displays a QR code directly in the terminal for the user to scan with Bilibili App. No interactive terminal menu, no external window. If API fails, falls back to biliup.exe in a new terminal.
 11. **Subtitle deduplication is automatic.** After transcription, `publish.py` removes consecutive duplicate/near-duplicate Whisper segments before generating SRT. No manual intervention needed.
-12. **WeChat 视频号 upload runs in an isolated subprocess** (`_weixin_upload_worker.py`) using async Playwright to avoid event loop conflicts. Login is handled via persistent browser profile; QR scan only needed on first use.
+12. **WeChat 视频号 upload runs in an isolated subprocess** (`src/workers/weixin_upload_worker.py`) using async Playwright to avoid event loop conflicts. Login is handled via persistent browser profile; QR scan only needed on first use.
 
 ## Claude Execution Workflow (MANDATORY)
 
@@ -114,8 +114,8 @@ The pipeline requires human action at exactly **three** points (only when auth i
 | When | Action | Duration | Frequency |
 |------|--------|----------|-----------|
 | NotebookLM auth expired | Complete Google login in popup browser | ~30s | Rare (tokens last weeks) |
-| Bilibili cookies missing | Scan terminal QR code with Bilibili App | ~10s | Rare (cookies last months) |
-| WeChat 视频号 auth expired | Scan QR code in popup browser | ~30s | Rare (persistent browser profile) |
+| Bilibili cookies missing | Scan terminal QR code with Bilibili App; intermediate status shown (scanned/confirming) | ~10s | Rare (cookies last months) |
+| WeChat 视频号 auth expired | Scan QR code in popup browser; 3s re-verify avoids false positives; instant detection on success | ~30s | Rare (persistent browser profile) |
 
 **Everything else is fully automated** — no confirmation prompts, no menu selections, no manual file operations.
 
@@ -126,8 +126,8 @@ PaperTalker-CLI/
 ├── CLAUDE.md                  # Project-level instructions for Claude Code
 ├── quick_video.py             # Phase 1: topic -> NotebookLM video (async)
 ├── publish.py                 # Phase 2: subtitle + upload (canonical copy)
-├── _weixin_upload_worker.py   # WeChat Channels upload subprocess (async Playwright)
-├── paper_search.py            # Multi-platform paper search wrapper
+├── src/workers/weixin_upload_worker.py   # WeChat Channels upload subprocess (async Playwright)
+├── src/utils/paper_search.py            # Multi-platform paper search wrapper
 ├── video.md                   # Video generation prompt (strict academic rigor)
 ├── schedule.txt               # Daily schedule: tab-separated format with completion tracking
 ├── run_scheduled.py           # Cron entry point: pick topic -> Phase 1 -> Phase 2
@@ -275,8 +275,8 @@ When cookies are missing, `publish.py` calls Bilibili's TV QR login API directly
 1. Requests a QR code from Bilibili's API
 2. Renders the QR code in the terminal via `qrcode` library (ASCII art)
 3. User scans with Bilibili App — no menu selection needed
-4. Polls for login completion (120s timeout)
-5. Saves cookies to `cookies/bilibili/account.json`
+4. Polls every 0.5s for login completion; shows **intermediate status** (`✓ 已扫码! 请在手机上点击「确认登录」`) when QR is scanned but not yet confirmed (API codes 86039/86090)
+5. Saves cookies to `cookies/bilibili/account.json` immediately on success (120s timeout)
 
 If the Python API fails, falls back to launching `biliup.exe login` in a new terminal window.
 
@@ -403,6 +403,25 @@ Script options:
 | 6 | Upload | Auto-generated title/desc/tags, cover image, per platform |
 | 7 | Cleanup | Delete original + WAV + cover temp, save run history JSON |
 
+### Modular Scripts (按需调用)
+
+For fine-grained control, use standalone scripts in `src/`:
+
+| Script | Purpose | Example |
+|--------|---------|---------|
+| `src/transcribe.py` | Audio extraction + Whisper transcription + SRT generation | `python src/transcribe.py video.mp4` |
+| `src/subtitle.py` | Burn SRT subtitles into video | `python src/subtitle.py video.mp4 subtitles.srt` |
+| `src/upload_bilibili.py` | Upload to Bilibili with metadata | `python src/upload_bilibili.py video.mp4 --title "标题" --tags "tag1,tag2" --cover cover.jpg` |
+| `src/upload_weixin.py` | Upload to WeChat Channels | `python src/upload_weixin.py video.mp4 --title "标题" --desc "描述"` |
+
+**Use cases:**
+- Re-transcribe with different model: `python src/transcribe.py video.mp4 --model large-v3 --device cuda`
+- Re-upload with different metadata: `python src/upload_bilibili.py video.mp4 --title "新标题" --tags "新标签"`
+- Subtitle-only workflow: `python src/transcribe.py video.mp4 && python src/subtitle.py video.mp4 video.srt`
+- Upload-only workflow: `python src/upload_bilibili.py video.mp4 --title "标题" --tags "tag1,tag2" --auto-login`
+
+**Note:** `publish.py` orchestrates these scripts internally. Use modular scripts when you need to retry a specific step or customize parameters.
+
 ### Smart Metadata Generation
 
 The script auto-generates B站-optimized metadata from the filename:
@@ -467,8 +486,8 @@ For Doubao ASR (cloud alternative to whisper), see [references/doubao_asr.md](re
 
 Login and upload are handled via Playwright browser automation:
 
-1. **Login**: `ensure_weixin_login()` checks `cookies/weixin/storage_state.json`. If missing, opens browser to `channels.weixin.qq.com` for QR scan (5 min timeout).
-2. **Upload**: `upload_weixin_channels()` navigates to the publish page, uploads video, fills title (max 30 chars) + description, and clicks publish.
+1. **Login**: Directly navigates to `https://channels.weixin.qq.com/platform/post/create`. If not logged in, WeChat automatically redirects to login page. After QR scan, WeChat automatically redirects back to create page. Polls every 0.5s for URL change from `login` to `post/create` (5 min timeout). No complex URL stability checks needed — WeChat handles the redirect flow.
+2. **Upload**: `upload_weixin_channels()` runs in isolated subprocess (`src/workers/weixin_upload_worker.py`) using async Playwright. Uploads video, fills title (6-16 chars, auto-padded if < 6) + description, clicks publish button (tries 3 methods: direct click, force click, JS click). Waits for URL redirect to `post/list` to confirm publish success, then keeps browser open 35s to ensure request completes.
 
 Usage: `python publish.py --platforms weixin_channels`
 
@@ -552,6 +571,9 @@ See [references/known_issues.md](references/known_issues.md) for full list. Crit
 | MKL `mkl_malloc` memory failure on CPU | Set `MKL_THREADING_LAYER=sequential`, `OMP_NUM_THREADS=1` before import; use `small` model on CPU |
 | biliup login interactive | Auto-handled: `publish.py` uses Python API for QR login (terminal QR code, no menu). Falls back to .bat if API fails |
 | Whisper duplicate segments | Auto-handled: `deduplicate_segments()` merges consecutive identical/near-identical segments after transcription |
+| WeChat 视频号 login detection | Direct navigate to `post/create` URL. If on login page, poll every 0.5s for URL change to `post/create` (WeChat auto-redirects after QR scan) |
+| WeChat 视频号 publish button | Try 3 click methods (direct, force, JS). Wait for URL redirect to `post/list` to confirm success. Keep browser open 35s after publish |
+| WeChat 视频号 short title < 6 chars | Auto-pad with "—视频解读" to meet 6-char minimum |
 | Playwright chromium version mismatch | `python -m playwright install chromium` (or upgrade playwright to match existing browser) |
 | Network errors during video generation | Do NOT create a new notebook. Record NID+TID from output, wait 2-3 min, then `--resume NID TID` |
 | NotebookLM auth expired | Auto-handled: `quick_video.py` calls `tools/auto_login.py` automatically |

@@ -47,6 +47,7 @@ DEFAULT_INPUT = PROJECT_ROOT / "output"
 DEFAULT_OUTPUT = PROJECT_ROOT / "output_subtitled"
 COOKIE_FILE = PROJECT_ROOT / "cookies" / "bilibili" / "account.json"
 WEIXIN_STORAGE_STATE = PROJECT_ROOT / "cookies" / "weixin" / "storage_state.json"
+WEIXIN_MP_PROFILE_DIR = PROJECT_ROOT / "cookies" / "weixin_mp" / "browser_profile"
 RUN_HISTORY_FILE = PROJECT_ROOT / "skills" / "paper-talker" / "references" / "run_history.json"
 
 # Subtitle display limits
@@ -625,8 +626,10 @@ def ensure_bilibili_login() -> bool:
     2. Bat fallback: write a temp .bat launching biliup.exe login in a new window.
     """
     if COOKIE_FILE.exists():
+        print(f"  {G}✓ B站Cookie已缓存，跳过登录{X}", flush=True)
         return True
 
+    print(f"  {Y}! B站Cookie不存在，需要扫码登录{X}", flush=True)
     COOKIE_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     # Strategy 1: Python API QR login (fully non-interactive)
@@ -653,6 +656,7 @@ def _qr_login_api() -> bool:
         return params
 
     session = _req.Session()
+    session.trust_env = False  # Bypass proxy for Chinese Bilibili API
 
     # Step 1 — request QR code (retry up to 3 times)
     r = None
@@ -689,33 +693,49 @@ def _qr_login_api() -> bool:
         print(f"  {D}（qrcode库不可用，请手动打开链接）{X}")
         print(f"  {D}{url}{X}")
 
-    print(f"\n  {D}等待扫码...{X}")
+    print(f"\n  {D}等待扫码... (最多120秒){X}", flush=True)
 
     # Step 3 — poll until scanned or timeout (120 s)
+    # B站 TV QR poll response codes:
+    #   0     = login success
+    #   86038 = QR not scanned yet
+    #   86039 = QR scanned, waiting for confirm on phone
+    #   86090 = QR scanned (another code variant)
     poll_params = _sign({
         "appkey": _APP_KEY, "auth_code": auth_code,
         "local_id": "0", "ts": int(time.time()),
     })
+    scanned_notified = False
     for i in range(120):
-        time.sleep(1)
+        time.sleep(0.5)  # Poll faster for responsive detection
         try:
             resp = session.post(
                 "http://passport.bilibili.com/x/passport-tv-login/qrcode/poll",
                 data=poll_params, timeout=5,
             ).json()
-            if resp and resp.get("code") == 0:
+            code = resp.get("code", -1) if resp else -1
+
+            if code == 0:
+                # Login success — save immediately
                 COOKIE_FILE.write_text(
                     json.dumps(resp["data"], ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
-                print(f"\n  {G}B站登录成功!{X}")
+                print(f"\n  {G}✓ B站登录成功! Cookie已保存{X}", flush=True)
                 return True
+
+            if code in (86039, 86090) and not scanned_notified:
+                # Scanned but not confirmed yet
+                print(f"  {Y}✓ 已扫码! 请在手机上点击「确认登录」...{X}", flush=True)
+                scanned_notified = True
+
         except Exception:
             pass
-        if i % 10 == 9:
-            print(f"  {D}等待扫码... ({i+1}s){X}")
+        # Progress: every 5 seconds (polling at 0.5s, so every 10 iterations)
+        if i % 10 == 9 and not scanned_notified:
+            print(f"  {D}等待扫码... ({(i+1)//2}s){X}", flush=True)
 
-    print(f"  {R}登录超时 (120s){X}")
+    print(f"  {R}登录超时 (120s){X}", flush=True)
     return False
 
 
@@ -768,40 +788,56 @@ def ensure_weixin_login() -> bool:
                 pass
 
             import time
-            time.sleep(3)
+            time.sleep(1)
             current_url = page.url
 
-            if "login" in current_url.lower():
+            if "login" not in current_url.lower():
+                print(f"  {G}✓ 微信视频号已缓存登录，无需扫码{X}", flush=True)
+            elif "login" in current_url.lower():
                 print(f"\n  {'='*50}")
-                print(f"  请用微信扫描浏览器中的二维码登录")
+                print(f"  {Y}请用微信扫描浏览器中的二维码登录{X}")
                 print(f"  扫码后在手机上点击「确认登录」")
                 print(f"  等待登录中... (最多5分钟)")
-                print(f"  {'='*50}\n")
+                print(f"  {'='*50}\n", flush=True)
 
                 max_wait = 300
                 start = time.time()
                 logged_in = False
+                last_print = 0
                 while time.time() - start < max_wait:
                     url = page.url
-                    # Only check URL change - body text causes false positives
                     if "login" not in url.lower():
-                        logged_in = True
-                        break
+                        # 3-second re-verify to avoid false positives
+                        print(f"  {Y}✓ 检测到页面跳转，验证登录状态...{X}", flush=True)
+                        time.sleep(1)
+                        url2 = page.url
+                        if "login" not in url2.lower():
+                            time.sleep(2)
+                            url3 = page.url
+                            if "login" not in url3.lower():
+                                logged_in = True
+                                print(f"  {G}✓✓ 扫码成功！登录状态已确认{X}", flush=True)
+                                print(f"  {G}登录后URL: {url3}{X}", flush=True)
+                                break
+                            else:
+                                print(f"  {D}URL短暂变化后回退，继续等待...{X}", flush=True)
+                        else:
+                            print(f"  {D}URL短暂变化后回退，继续等待...{X}", flush=True)
                     elapsed = int(time.time() - start)
-                    if elapsed % 15 == 0 and elapsed > 0:
-                        print(f"  等待扫码... ({elapsed}s)")
-                    time.sleep(2)
+                    if elapsed >= last_print + 10:
+                        print(f"  {D}等待扫码... ({elapsed}s){X}", flush=True)
+                        last_print = elapsed
+                    time.sleep(0.3)  # Fast polling for responsive detection
 
                 if not logged_in:
-                    print(f"  {R}登录超时 (5分钟){X}")
+                    print(f"  {R}登录超时 (5分钟){X}", flush=True)
                     context.close()
                     return False
 
-                print(f"  {G}登录成功!{X}")
+                print(f"  {G}✓ 微信视频号登录成功! 状态已保存{X}", flush=True)
                 # Save storage state as backup
                 WEIXIN_STORAGE_STATE.parent.mkdir(parents=True, exist_ok=True)
                 context.storage_state(path=str(WEIXIN_STORAGE_STATE))
-                time.sleep(2)
 
             context.close()
 
@@ -809,6 +845,105 @@ def ensure_weixin_login() -> bool:
 
     except Exception as e:
         print(f"  {R}登录失败: {e}{X}")
+        return False
+
+
+def ensure_weixin_mp_login() -> bool:
+    """Ensure WeChat Official Account (mp.weixin.qq.com) login via Playwright.
+
+    Uses browser_profile directory to persist login across sessions.
+    If not logged in, opens browser for QR scan and waits.
+
+    Returns:
+        True if logged in (or login succeeded), False otherwise.
+    """
+    WEIXIN_MP_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print(f"  {R}ERROR{X} playwright not installed")
+        return False
+
+    try:
+        with sync_playwright() as p:
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=str(WEIXIN_MP_PROFILE_DIR),
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-proxy-server",
+                ],
+                viewport={"width": 1920, "height": 1080},
+                locale="zh-CN",
+                ignore_https_errors=True,
+            )
+            page = context.pages[0] if context.pages else context.new_page()
+
+            try:
+                page.goto("https://mp.weixin.qq.com/", timeout=30000)
+            except Exception:
+                pass
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
+
+            import time
+            time.sleep(2)
+
+            # mp.weixin.qq.com: logged in → redirects to /cgi-bin/home
+            # not logged in → stays on root URL with QR code
+            current_url = page.url
+            if "cgi-bin" in current_url:
+                print(f"  {G}✓ 微信公众号已缓存登录，无需扫码{X}", flush=True)
+            else:
+                print(f"\n  {'='*50}")
+                print(f"  {Y}请用微信扫描浏览器中的二维码登录公众号{X}")
+                print(f"  扫码后在手机上点击「确认登录」")
+                print(f"  等待登录中... (最多5分钟)")
+                print(f"  {'='*50}\n", flush=True)
+
+                max_wait = 300
+                start = time.time()
+                logged_in = False
+                last_print = 0
+                while time.time() - start < max_wait:
+                    url = page.url
+                    if "cgi-bin" in url:
+                        # 3-second re-verify to avoid false positives
+                        print(f"  {Y}✓ 检测到页面跳转，验证登录状态...{X}", flush=True)
+                        time.sleep(1)
+                        url2 = page.url
+                        if "cgi-bin" in url2:
+                            time.sleep(2)
+                            url3 = page.url
+                            if "cgi-bin" in url3:
+                                logged_in = True
+                                break
+                            else:
+                                print(f"  {D}URL短暂变化后回退，继续等待...{X}", flush=True)
+                        else:
+                            print(f"  {D}URL短暂变化后回退，继续等待...{X}", flush=True)
+                    elapsed = int(time.time() - start)
+                    if elapsed >= last_print + 10:
+                        print(f"  {D}等待扫码... ({elapsed}s){X}", flush=True)
+                        last_print = elapsed
+                    time.sleep(0.3)
+
+                if not logged_in:
+                    print(f"  {R}公众号登录超时 (5分钟){X}", flush=True)
+                    context.close()
+                    return False
+
+                print(f"  {G}✓ 微信公众号登录成功!{X}", flush=True)
+
+            context.close()
+
+        return True
+
+    except Exception as e:
+        print(f"  {R}公众号登录失败: {e}{X}")
         return False
 
 
@@ -877,39 +1012,55 @@ def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: str, c
                 page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass
-            time.sleep(5)
+            time.sleep(2)
 
             # Inline login check: if redirected to login page, wait for QR scan
-            if "login" in page.url.lower():
+            if "login" not in page.url.lower():
+                print(f"  {G}✓ 微信视频号已缓存登录，直接上传{X}", flush=True)
+            else:
                 print(f"\n  {'='*50}")
-                print(f"  请用微信扫描浏览器中的二维码登录")
+                print(f"  {Y}请用微信扫描浏览器中的二维码登录{X}")
                 print(f"  扫码后在手机上点击「确认登录」")
                 print(f"  等待登录中... (最多5分钟)")
-                print(f"  {'='*50}\n")
+                print(f"  {'='*50}\n", flush=True)
 
                 max_wait = 300
                 start = time.time()
                 logged_in = False
+                last_print = 0
                 while time.time() - start < max_wait:
                     url = page.url
-                    # Only check URL change - body text causes false positives
                     if "login" not in url.lower():
-                        logged_in = True
-                        break
+                        # 3-second re-verify to avoid false positives
+                        print(f"  {Y}✓ 检测到页面跳转，验证登录状态...{X}", flush=True)
+                        time.sleep(1)
+                        url2 = page.url
+                        if "login" not in url2.lower():
+                            time.sleep(2)
+                            url3 = page.url
+                            if "login" not in url3.lower():
+                                logged_in = True
+                                print(f"  {G}✓✓ 扫码成功！登录状态已确认{X}", flush=True)
+                                print(f"  {G}登录后URL: {url3}{X}", flush=True)
+                                break
+                            else:
+                                print(f"  {D}URL短暂变化后回退，继续等待...{X}", flush=True)
+                        else:
+                            print(f"  {D}URL短暂变化后回退，继续等待...{X}", flush=True)
                     elapsed = int(time.time() - start)
-                    if elapsed % 15 == 0 and elapsed > 0:
-                        print(f"  等待扫码... ({elapsed}s)")
-                    time.sleep(2)
+                    if elapsed >= last_print + 10:
+                        print(f"  {D}等待扫码... ({elapsed}s){X}", flush=True)
+                        last_print = elapsed
+                    time.sleep(0.3)  # Fast polling for responsive detection
 
                 if not logged_in:
-                    print(f"  {R}登录超时 (5分钟){X}")
+                    print(f"  {R}登录超时 (5分钟){X}", flush=True)
                     context.close()
                     return {"ok": False, "error": "Login timeout"}
 
-                print(f"  {G}登录成功!{X}")
+                print(f"  {G}✓ 微信视频号登录成功! 立即继续上传...{X}", flush=True)
                 WEIXIN_STORAGE_STATE.parent.mkdir(parents=True, exist_ok=True)
                 context.storage_state(path=str(WEIXIN_STORAGE_STATE))
-                time.sleep(2)
 
                 # Navigate to upload page after login
                 try:
@@ -920,7 +1071,7 @@ def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: str, c
                     page.wait_for_load_state("networkidle", timeout=15000)
                 except Exception:
                     pass
-                time.sleep(5)
+                time.sleep(2)
 
             # Find the wujie iframe (form is rendered inside it)
             # The wujie micro-frontend renders the upload form in an iframe
@@ -1198,102 +1349,31 @@ def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: str, c
 
 
 def upload_weixin_article(video_path: Path, title: str, desc: str, tags: str, cover_path: Path, srt_path: Path, bilibili_result: str) -> dict:
-    """Publish article to WeChat Official Account via API.
+    """Publish article to WeChat Official Account.
 
-    Creates a draft article with video link (if Bilibili BV available) and
-    full transcript from SRT file, then publishes it.
-
-    Args:
-        video_path: Path to video (for metadata)
-        title: Article title
-        desc: Article description
-        tags: Tags (unused for articles)
-        cover_path: Cover image path
-        srt_path: SRT subtitle file path
-        bilibili_result: Bilibili upload result string (e.g., "ok:BV1xx...")
-
-    Returns:
-        {"ok": bool, "publish_id": str, "error": str}
+    Strategy:
+    1. Try WeChat API (if WECHAT_APPID/WECHAT_APPSECRET configured in .env)
+    2. Fall back to Playwright browser automation (QR scan login)
     """
     from dotenv import load_dotenv
     load_dotenv(PROJECT_ROOT / ".env")
 
-    appid = os.getenv("WECHAT_APPID")
-    appsecret = os.getenv("WECHAT_APPSECRET")
+    appid = os.getenv("WECHAT_APPID", "")
+    appsecret = os.getenv("WECHAT_APPSECRET", "")
+    has_api_creds = appid and appsecret and "your_" not in appid and "your_" not in appsecret
 
-    if not appid or not appsecret:
-        return {"ok": False, "error": "WECHAT_APPID/WECHAT_APPSECRET not set in .env"}
+    # Generate article HTML content
+    html_content = generate_article_html(title, desc, srt_path, bilibili_result)
 
-    try:
-        import requests
+    if has_api_creds:
+        # Strategy 1: WeChat API
+        ret = _upload_weixin_article_api(title, desc, html_content, cover_path, appid, appsecret)
+        if ret["ok"]:
+            return ret
+        print(f"      {Y}API方式失败 ({ret['error']})，尝试浏览器方式...{X}", flush=True)
 
-        # Step 1: Get access token
-        token_resp = requests.get(
-            "https://api.weixin.qq.com/cgi-bin/token",
-            params={"grant_type": "client_credential", "appid": appid, "secret": appsecret},
-            timeout=10,
-        ).json()
-
-        if "access_token" not in token_resp:
-            return {"ok": False, "error": f"Token failed: {token_resp.get('errmsg', 'unknown')}"}
-
-        access_token = token_resp["access_token"]
-
-        # Step 2: Upload cover image
-        thumb_media_id = None
-        if cover_path and cover_path.exists():
-            with open(cover_path, "rb") as f:
-                files = {"media": (cover_path.name, f, "image/jpeg")}
-                upload_resp = requests.post(
-                    f"https://api.weixin.qq.com/cgi-bin/material/add_material?access_token={access_token}&type=image",
-                    files=files,
-                    timeout=30,
-                ).json()
-                thumb_media_id = upload_resp.get("media_id")
-
-        # Step 3: Generate article HTML content
-        html_content = generate_article_html(title, desc, srt_path, bilibili_result)
-
-        # Step 4: Create draft
-        draft_data = {
-            "articles": [{
-                "title": title,
-                "author": "AI科研助手",
-                "digest": desc[:120],  # Summary (max 120 chars)
-                "content": html_content,
-                "content_source_url": "",  # Original article link (optional)
-                "thumb_media_id": thumb_media_id or "",
-                "need_open_comment": 0,
-                "only_fans_can_comment": 0,
-            }]
-        }
-
-        draft_resp = requests.post(
-            f"https://api.weixin.qq.com/cgi-bin/draft/add?access_token={access_token}",
-            json=draft_data,
-            timeout=30,
-        ).json()
-
-        if "media_id" not in draft_resp:
-            return {"ok": False, "error": f"Draft failed: {draft_resp.get('errmsg', 'unknown')}"}
-
-        media_id = draft_resp["media_id"]
-
-        # Step 5: Publish draft
-        publish_resp = requests.post(
-            f"https://api.weixin.qq.com/cgi-bin/freepublish/submit?access_token={access_token}",
-            json={"media_id": media_id},
-            timeout=30,
-        ).json()
-
-        if publish_resp.get("errcode") != 0:
-            return {"ok": False, "error": f"Publish failed: {publish_resp.get('errmsg', 'unknown')}"}
-
-        publish_id = publish_resp.get("publish_id", "")
-        return {"ok": True, "publish_id": publish_id}
-
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    # Strategy 2: Playwright subprocess
+    return _run_weixin_mp_subprocess(title, html_content, str(cover_path) if cover_path else None)
 
 
 def generate_article_html(title: str, desc: str, srt_path: Path, bilibili_result: str) -> str:
@@ -1335,6 +1415,104 @@ def generate_article_html(title: str, desc: str, srt_path: Path, bilibili_result
 <p style="white-space: pre-wrap;">{transcript}</p>
 """
     return html
+
+
+def _upload_weixin_article_api(title: str, desc: str, html_content: str, cover_path: Path, appid: str, appsecret: str) -> dict:
+    """Upload article via WeChat Official Account API (needs APPID/APPSECRET)."""
+    try:
+        import requests
+
+        token_resp = requests.get(
+            "https://api.weixin.qq.com/cgi-bin/token",
+            params={"grant_type": "client_credential", "appid": appid, "secret": appsecret},
+            timeout=10,
+        ).json()
+
+        if "access_token" not in token_resp:
+            return {"ok": False, "error": f"Token failed: {token_resp.get('errmsg', 'unknown')}"}
+
+        access_token = token_resp["access_token"]
+
+        thumb_media_id = None
+        if cover_path and Path(cover_path).exists():
+            with open(cover_path, "rb") as f:
+                files = {"media": (Path(cover_path).name, f, "image/jpeg")}
+                upload_resp = requests.post(
+                    f"https://api.weixin.qq.com/cgi-bin/material/add_material?access_token={access_token}&type=image",
+                    files=files, timeout=30,
+                ).json()
+                thumb_media_id = upload_resp.get("media_id")
+
+        draft_data = {
+            "articles": [{
+                "title": title,
+                "author": "AI科研助手",
+                "digest": desc[:120],
+                "content": html_content,
+                "content_source_url": "",
+                "thumb_media_id": thumb_media_id or "",
+                "need_open_comment": 0,
+                "only_fans_can_comment": 0,
+            }]
+        }
+
+        draft_resp = requests.post(
+            f"https://api.weixin.qq.com/cgi-bin/draft/add?access_token={access_token}",
+            json=draft_data, timeout=30,
+        ).json()
+
+        if "media_id" not in draft_resp:
+            return {"ok": False, "error": f"Draft failed: {draft_resp.get('errmsg', 'unknown')}"}
+
+        media_id = draft_resp["media_id"]
+
+        publish_resp = requests.post(
+            f"https://api.weixin.qq.com/cgi-bin/freepublish/submit?access_token={access_token}",
+            json={"media_id": media_id}, timeout=30,
+        ).json()
+
+        if publish_resp.get("errcode") != 0:
+            return {"ok": False, "error": f"Publish failed: {publish_resp.get('errmsg', 'unknown')}"}
+
+        return {"ok": True, "publish_id": publish_resp.get("publish_id", "")}
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _run_weixin_mp_subprocess(title: str, content_html: str, cover_path: str = None) -> dict:
+    """Run WeChat Official Account article upload in subprocess via Playwright."""
+    import tempfile
+
+    result_file = Path(tempfile.mktemp(suffix=".json", prefix="weixin_mp_result_"))
+    worker_script = PROJECT_ROOT / "_weixin_mp_upload_worker.py"
+
+    args_json = json.dumps({
+        "title": title,
+        "content_html": content_html,
+        "cover_path": cover_path,
+    }, ensure_ascii=False)
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-u", str(worker_script), args_json, str(result_file)],
+            timeout=600,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"},
+        )
+        if result_file.exists():
+            ret = json.loads(result_file.read_text(encoding="utf-8"))
+            result_file.unlink(missing_ok=True)
+            return ret
+        elif proc.returncode != 0:
+            return {"ok": False, "error": f"Subprocess exit code {proc.returncode}"}
+        else:
+            return {"ok": False, "error": "No result from subprocess"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Upload timeout (10min)"}
+    except Exception as e:
+        return {"ok": False, "error": f"Subprocess error: {e}"}
+    finally:
+        result_file.unlink(missing_ok=True)
 
 
 def _qr_login_bat() -> bool:
@@ -1395,9 +1573,12 @@ def _qr_login_bat() -> bool:
         bat_path.unlink(missing_ok=True)
 
 
-def upload_bilibili(video_path: Path, title: str, desc: str, tags: str,
-                    cover_path: Path = None) -> dict:
+def upload_bilibili(video_path, title: str, desc: str, tags: str,
+                    cover_path=None) -> dict:
     """Upload video to Bilibili with title, desc, tags, and optional cover."""
+    video_path = Path(video_path) if not isinstance(video_path, Path) else video_path
+    if cover_path:
+        cover_path = Path(cover_path) if not isinstance(cover_path, Path) else cover_path
     if not COOKIE_FILE.exists():
         if not ensure_bilibili_login():
             return {"ok": False, "bvid": "", "error": "B站未登录"}
@@ -1471,7 +1652,7 @@ def _run_weixin_channels_subprocess(video_path: Path, title: str, desc: str, tag
     import tempfile
 
     result_file = Path(tempfile.mktemp(suffix=".json", prefix="weixin_result_"))
-    worker_script = PROJECT_ROOT / "_weixin_upload_worker.py"
+    worker_script = PROJECT_ROOT / "src/workers/weixin_upload_worker.py"
 
     args_json = json.dumps({
         "video_path": str(video_path),
@@ -1656,11 +1837,119 @@ def process_video(
     return result
 
 
+def ensure_all_logins(platforms: list[str]) -> dict:
+    """Pre-authenticate all platforms concurrently before uploading.
+
+    Phase 1: Quick cache/credential check for all platforms
+    Phase 2: Start all needed QR logins at once (B站 terminal + WeChat browsers)
+    Phase 3: Wait for all to complete and report results
+
+    Returns:
+        dict mapping platform -> bool (True=ready, False=failed)
+    """
+    import threading
+
+    results = {}
+    need_login = []
+
+    # ── Phase 1: Cache check ──
+    print(f"\n  {B}[登录预检]{X} 检查各平台认证状态")
+
+    if "bilibili" in platforms:
+        if COOKIE_FILE.exists():
+            print(f"    B站:       {G}✓ Cookie已缓存{X}")
+            results["bilibili"] = True
+        else:
+            print(f"    B站:       {Y}! 需要扫码登录{X}")
+            need_login.append("bilibili")
+
+    if "weixin_channels" in platforms:
+        profile_dir = WEIXIN_STORAGE_STATE.parent / "browser_profile"
+        has_profile = profile_dir.exists() and any(profile_dir.iterdir()) if profile_dir.exists() else False
+        if has_profile:
+            print(f"    微信视频号: {D}有缓存，需浏览器验证{X}")
+        else:
+            print(f"    微信视频号: {Y}! 需要扫码登录{X}")
+        need_login.append("weixin_channels")
+
+    if "weixin_article" in platforms:
+        has_profile = WEIXIN_MP_PROFILE_DIR.exists() and any(WEIXIN_MP_PROFILE_DIR.iterdir()) if WEIXIN_MP_PROFILE_DIR.exists() else False
+        if has_profile:
+            print(f"    微信公众号: {D}有缓存，需浏览器验证{X}")
+        else:
+            print(f"    微信公众号: {Y}! 需要扫码登录{X}")
+        need_login.append("weixin_article")
+
+    if not need_login:
+        print(f"\n  {G}✓ 所有平台已就绪!{X}\n")
+        return results
+
+    # ── Phase 2: Concurrent login ──
+    has_bilibili = "bilibili" in need_login
+    weixin_logins = [p for p in need_login if p != "bilibili"]
+
+    if len(need_login) > 1:
+        print(f"\n  {Y}▶ 同时启动 {len(need_login)} 个平台登录 — 请依次完成扫码{X}")
+        if has_bilibili:
+            print(f"    B站:   用B站App扫描终端二维码")
+        if "weixin_channels" in need_login:
+            print(f"    视频号: 用微信扫描浏览器二维码")
+        if "weixin_article" in need_login:
+            print(f"    公众号: 用微信扫描浏览器二维码")
+        print()
+
+    threads = []
+
+    # Start WeChat logins in background threads (open browser windows)
+    if "weixin_channels" in need_login:
+        def _login_weixin_channels():
+            results["weixin_channels"] = ensure_weixin_login()
+        t = threading.Thread(target=_login_weixin_channels, daemon=True)
+        threads.append(t)
+        t.start()
+
+    if "weixin_article" in need_login:
+        def _login_weixin_mp():
+            results["weixin_article"] = ensure_weixin_mp_login()
+        t = threading.Thread(target=_login_weixin_mp, daemon=True)
+        threads.append(t)
+        t.start()
+
+    # B站 login in main thread (terminal QR code — no thread conflicts)
+    if has_bilibili:
+        results["bilibili"] = ensure_bilibili_login()
+
+    # Wait for all background threads
+    for t in threads:
+        t.join(timeout=360)
+
+    # ── Phase 3: Summary ──
+    print(f"\n  {B}[登录结果]{X}")
+    failed = []
+    for plat in platforms:
+        status = results.get(plat)
+        if status is True:
+            print(f"    {plat:18} {G}✓ 就绪{X}")
+        elif status is False:
+            print(f"    {plat:18} {R}✗ 失败{X}")
+            failed.append(plat)
+        else:
+            print(f"    {plat:18} {Y}? 超时{X}")
+            failed.append(plat)
+
+    if not failed:
+        print(f"\n  {G}✓ 所有平台登录完成! 自动开始处理...{X}\n")
+    else:
+        print(f"\n  {Y}! 以下平台将跳过: {', '.join(failed)}{X}\n")
+
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description="Video post-production: subtitle + upload")
     parser.add_argument("--input", default=str(DEFAULT_INPUT), help="Input video directory")
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT), help="Output base directory")
-    parser.add_argument("--platforms", nargs="+", default=["bilibili"],
+    parser.add_argument("--platforms", nargs="+", default=["bilibili", "weixin_channels"],
                         choices=PLATFORMS, help="Upload platforms")
     parser.add_argument("--skip-upload", action="store_true", help="Skip upload step")
     args = parser.parse_args()
@@ -1701,6 +1990,16 @@ def main():
 
     # Get FFmpeg
     ffmpeg = get_ffmpeg()
+
+    # Pre-authenticate all platforms (parallel QR scan)
+    if not args.skip_upload:
+        login_results = ensure_all_logins(args.platforms)
+        # Filter out platforms that failed login
+        active_platforms = [p for p in args.platforms if login_results.get(p) is not False]
+        if not active_platforms:
+            print(f"{R}所有平台登录失败，无法上传。{X}")
+            return
+        args.platforms = active_platforms
 
     # Process each video
     results = []
