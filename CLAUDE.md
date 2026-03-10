@@ -83,6 +83,9 @@ Full pipeline documentation is in `skills/paper-talker/SKILL.md`. This is the au
 | WeChat 视频号 login detection | Direct navigate to `post/create`. Poll every 0.5s for URL change from `login` to `post/create` (WeChat auto-redirects) |
 | WeChat 视频号 publish button | Try 3 click methods. Wait for URL redirect to `post/list`. Keep browser open 35s after publish |
 | WeChat 视频号 short title < 6 chars | Auto-pad with "—视频解读" to meet minimum |
+| Deep Research rate limit | Auto-fallback to Fast Research (`--mode fast`) or use `--source search` for paper search |
+| Bilibili tag length limit | Each tag max 20 chars, max 12 tags total |
+| paper_search import after refactor | Use `from src.utils.paper_search import search_papers` |
 
 ## Environment
 
