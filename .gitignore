@@ -37,7 +37,8 @@ env/
 
 # Output files
 output/
-output_subtitled/
+output_subtitled/*
+!output_subtitled/.gitkeep
 *.mp4
 *.mp3
 *.wav
@@ -46,9 +47,8 @@ output_subtitled/
 # Cookies and credentials
 cookies/
 
-# Vendor binaries (platform-specific, downloaded separately)
-vendor/
-!vendor/.gitkeep
+# Vendor: only ignore the macOS tarball (too large)
+vendor/biliupR-*.tar.xz
 
 # NotebookLM authentication
 .notebooklm/
