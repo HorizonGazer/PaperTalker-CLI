@@ -19,7 +19,8 @@
 2. **每天 17:00**：预告明天的日程给用户，等待确认或修改
 3. **每天 08:30**：执行当天排期的完整流水线（生成视频 → 字幕 → 发布）
 4. **按需执行**：用户随时可以让你手动执行指定主题
-5. **结果反馈**：每次执行完成或失败后，通过飞书/消息通知用户
+5. **结果反馈**：每次执行完成或失败后，**必须通过飞书 (channel='feishu') 通知用户**
+6. **飞书对话**：用户可以在飞书上直接对你说话触发任务（如"帮我做一个 X 的视频"）
 
 **核心原则：**
 - **耐心等待**：完整流水线 40-90 分钟是正常的，绝不提前中断
@@ -249,13 +250,13 @@ Execute the following steps:
 2. Run: \$env:PYTHONIOENCODING='utf-8'; \$env:PYTHONUNBUFFERED='1'; & '<PYTHON_PATH>' -u auto_tracker.py --write-schedule --force
    Timeout: 10 minutes. Be patient, it searches multiple academic databases.
 3. After completion, read schedule.txt
-4. Report to user via message:
+4. Report to user via 飞书 message (use message tool with channel='feishu'):
    '📚 本周论文趋势调研完成，已安排以下主题：
    - [日期] [主题] (来源: [领域])
    - ...
    如需修改请回复。'
 
-If auto_tracker fails, report the error to user."
+If auto_tracker fails, report the error to user via 飞书."
 ```
 
 #### Cron 2: 每天日程预告 (17:00)
@@ -271,7 +272,7 @@ Steps:
 1. Read <PROJECT_ROOT>/schedule.txt
 2. Calculate tomorrow's date (YYYY-MM-DD)
 3. Search for: a) exact date match with status=pending, OR b) first 'queue' entry with status=pending
-4. Send message to user:
+4. Send message to user via 飞书 (use message tool with channel='feishu'):
    If found: '📋 明天的 PaperTalker 日程：[topic]，来源模式：[source_mode]，将于明早 8:30 自动执行。如需修改请回复。'
    If not found: '📋 明天没有待处理的 PaperTalker 主题。需要我运行趋势调研发现新主题吗？'
 
@@ -328,7 +329,7 @@ If B站 QR needed: terminal displays QR, user scans with B站 App
 If 视频号 QR needed: browser popup, user scans with WeChat
 
 --- STEP 4: Report Results ---
-Notify user with results:
+Send results to user via 飞书 (use message tool with channel='feishu'):
   '✅ PaperTalker 今日任务完成！
   主题：[topic]
   时长：[duration]
@@ -336,6 +337,9 @@ Notify user with results:
   B站：[BV号 or 失败原因]
   视频号：[成功/失败]
   文件：output_subtitled/[date]/[topic].mp4'
+
+If any upload failed, also send:
+  '⚠️ [平台]上传失败: [原因]。视频已保留，回复"重新上传"即可重试。'
 
 Update schedule.txt: change status to 'completed' with timestamp, or 'failed' with notes.
 
@@ -566,12 +570,13 @@ for p in results: print(f'  - {p[\"title\"][:60]}')
 1. 执行 publish.py --platforms bilibili weixin_channels
 2. 检查输出的 Summary 表格
 3. 如果某个平台显示 FAIL:
-   a. 通知用户: "视频已生成并加好字幕，但 [平台] 上传失败: [原因]。
+   a. 通过飞书通知用户 (message tool, channel='feishu'):
+      "视频已生成并加好字幕，但 [平台] 上传失败: [原因]。
       文件: output_subtitled/[date]/[topic].mp4
       需要登录 [平台] 后重新上传吗？"
-   b. 等待用户回复
+   b. 等待用户在飞书回复
    c. 用户确认后: publish.py --retry --platforms [失败平台]
-4. 如果所有平台成功: 正常汇报
+4. 如果所有平台成功: 通过飞书汇报结果
 ```
 
 ### 5.5 Cron 中的发布失败处理
@@ -580,7 +585,7 @@ for p in results: print(f'  - {p[\"title\"][:60]}')
 
 ```
 1. 不要重试整个流水线 (视频已生成!)
-2. 通知用户:
+2. 通过飞书通知用户 (message tool, channel='feishu'):
    "⚠️ 今日视频已生成但部分平台上传失败
    主题: [topic]
    字幕: [count] 条
@@ -589,7 +594,7 @@ for p in results: print(f'  - {p[\"title\"][:60]}')
    文件: output_subtitled/[date]/[topic].mp4
    
    请完成平台登录后回复"重新上传"，我会立即上传。"
-3. 等用户回复后执行: publish.py --retry
+3. 等用户在飞书回复后执行: publish.py --retry
 ```
 
 ---
@@ -683,7 +688,8 @@ PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 "<PYTHON_PATH>" -u <script.py> [args..
   - 转录失败 → 单独重试 src/transcribe.py
 
 === Phase 3: 汇报结果 ===
-通知用户: 主题、时长、字幕数、BV号、视频号状态、文件路径
+通过飞书通知用户 (message tool, channel='feishu'):
+  主题、时长、字幕数、BV号、视频号状态、文件路径
 更新 schedule.txt: completed/failed + 时间戳
 ```
 
@@ -901,9 +907,17 @@ Whisper 有时会在音频静默处幻觉出不存在的内容：
 
 ## 11. 反馈和通知
 
-### 8.1 执行结果通知
+### 11.1 通知渠道: 飞书 (必须)
 
-每次流水线执行完成后，你应该通过你的消息渠道（飞书、Telegram、Discord 等）通知用户。
+**所有通知必须发送到飞书。** 使用 `message` 工具：
+
+```
+message(action="send", channel="feishu", message="通知内容")
+```
+
+⚠️ 无论是 cron 触发还是用户在飞书对话中触发的任务，结果都必须通过飞书发送。
+
+### 11.2 执行结果通知
 
 **成功模板：**
 ```
@@ -926,9 +940,9 @@ Whisper 有时会在音频静默处幻觉出不存在的内容：
 📎 NID: d345c7e4-...  TID: 9832932f-...
 ```
 
-### 8.2 日程预告通知
+### 11.3 日程预告通知
 
-每天 17:00 发送：
+每天 17:00 发送到飞书：
 ```
 📋 明天的 PaperTalker 日程
 主题：空间转录组+AI
@@ -938,9 +952,9 @@ Whisper 有时会在音频静默处幻觉出不存在的内容：
 如需修改请回复。
 ```
 
-### 8.3 趋势调研通知
+### 11.4 趋势调研通知
 
-每周日 17:00 发送：
+每周日 17:00 发送到飞书：
 ```
 📚 本周论文趋势调研完成
 已安排以下主题：
@@ -950,6 +964,32 @@ Whisper 有时会在音频静默处幻觉出不存在的内容：
 ...
 如需修改请回复。
 ```
+
+---
+
+### 11.5 飞书对话触发任务
+
+用户可以在飞书对话中直接对你说自然语言来触发任务。**你应识别以下意图并执行对应操作：**
+
+| 用户说 | 你应执行 |
+|-------|---------|
+| "帮我做一个关于 X 的视频" | Phase 1 → Phase 2 全流程，完成后飞书通知 |
+| "生成 X 视频" | 同上 |
+| "今天的任务是什么" / "看看日程" | 读 schedule.txt → 飞书回复 |
+| "重新上传" / "上传失败了" | `publish.py --retry` → 飞书通知结果 |
+| "跑一下趋势调研" | `auto_tracker.py --write-schedule` → 飞书通知 |
+| "修改明天主题为 X" | 编辑 schedule.txt → 飞书确认 |
+| "添加主题 X 到队列" | 在 schedule.txt 追加 queue 行 → 飞书确认 |
+| "检查环境" | `tools/verify.py` → 飞书回复 |
+| "登录 B站" / "登录视频号" | 执行登录流程 → 飞书提示用户扫码 |
+
+**执行流程：**
+1. 收到飞书消息 → 识别意图
+2. 执行对应命令（遵循 §6 Windows Python 规则 + §7 耐心等待规则）
+3. 执行完成后 → 通过飞书回复结果（不要只在终端打印）
+4. 如果需要用户操作（扫码登录等）→ 通过飞书告知
+
+**关键：你的回复必须发送到飞书，而不是只在日志里。每个任务结束都要有飞书反馈。**
 
 ---
 
@@ -1080,7 +1120,7 @@ Get-Content "<PROJECT_ROOT>/tracker_history.txt"
    → [6/7] B站 BV1bZw4zLEJf ✓ | 视频号 ✓
    → [7/7] 清理
 
-5. 通知用户:
+5. 通过飞书通知用户 (message tool, channel='feishu'):
    ✅ "随机过程"视频完成！
    时长8:36, 226字幕, B站BV1bZw4zLEJf, 视频号已发布
 ```
