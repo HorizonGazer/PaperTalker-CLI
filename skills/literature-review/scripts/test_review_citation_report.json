@@ -1,0 +1,21 @@
+{
+  "total_dois": 3,
+  "verified": [
+    "10.1016/j.cell.2022.01.001"
+  ],
+  "failed": [
+    "10.1038/s41573-019-0012-3",
+    "10.9999/fake/doi12345"
+  ],
+  "metadata": {
+    "10.1016/j.cell.2022.01.001": {
+      "title": "Receptor binding and complex structures of human ACE2 to spike RBD from omicron and delta SARS-CoV-2",
+      "authors": "Han, P., Li, L., Liu, S., et al.",
+      "year": "2022",
+      "journal": "Cell",
+      "volume": "185",
+      "pages": "630-640.e10",
+      "doi": "10.1016/j.cell.2022.01.001"
+    }
+  }
+}

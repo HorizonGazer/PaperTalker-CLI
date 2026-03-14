@@ -1,0 +1,6 @@
+# Vendor directory for platform-specific binaries
+# Download from: https://github.com/biliup/biliup-rs/releases
+#
+# Windows: biliup.exe
+# macOS:   biliup-macos (from biliupR-v1.1.29-x86_64-macos.tar.xz)
+# Linux:   biliup (from biliupR-v1.1.29-x86_64-linux.tar.xz)

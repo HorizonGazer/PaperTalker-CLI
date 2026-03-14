@@ -11,10 +11,10 @@ PaperTalker-CLI · quick_video.py — 一键主题→视频 (独立版)
     python quick_video.py "Transformer" --source paper
 
 来源模式 (--source):
-    research   Deep Research 自动搜索网络资料（默认）
-    search     paper-search-mcp 论文检索，支持 --platforms / --year / --max-results
+    research   NotebookLM Deep/Fast Research 自动搜索网络资料（默认）
+    search     自主文献检索 (Semantic Scholar + arXiv + CrossRef)，支持 --platforms / --year / --max-results
     upload     打开 NotebookLM 笔记本页面，用户手动上传文件后继续
-    mixed      先 Deep Research，再补充论文检索
+    mixed      先 NotebookLM Research，再补充自主文献检索
     file       导入本地文件（PDF/txt/md/docx），需配合 --files 参数
     paper      按标题搜索论文，列出候选让用户选择后导入
 
@@ -30,6 +30,7 @@ PaperTalker-CLI · quick_video.py — 一键主题→视频 (独立版)
 import argparse
 import asyncio
 import os
+import subprocess
 import sys
 import time
 import webbrowser
@@ -99,7 +100,7 @@ async def preflight_check() -> bool:
                 login_script = str(CLI_DIR / "tools" / "auto_login.py")
                 login_result = subprocess.run(
                     [sys.executable, login_script],
-                    timeout=360,
+                    timeout=720,
                 )
                 if login_result.returncode != 0:
                     err("自动登录失败，请手动运行: python tools/auto_login.py")
@@ -277,9 +278,9 @@ async def source_deep_research(client, notebook_id: str, topic: str, mode: str =
     task_id = task.get("task_id")
     ok(f"Research 已启动: task_id={task_id}")
 
-    step(3, 7, "等待 Deep Research 完成 (最长 20 分钟)...")
+    step(3, 7, "等待 Deep Research 完成 (最长 40 分钟)...")
     consecutive_errors = 0
-    for i in range(240):
+    for i in range(480):
         await asyncio.sleep(5)
         try:
             result = await client.research.poll(notebook_id)
@@ -315,7 +316,7 @@ async def source_deep_research(client, notebook_id: str, topic: str, mode: str =
 
 
 async def source_paper_search(topic: str, platforms: list[str], max_results: int, year: int | None) -> list[dict]:
-    """paper-search-mcp 论文检索。"""
+    """自主文献检索 (literature-review skill: Semantic Scholar + arXiv + CrossRef)。"""
     from src.utils.paper_search import search_papers
     step(2, 7, f"搜索论文: platforms={platforms}, max={max_results}, year={year or 'any'}...")
     t0 = time.time()
@@ -463,35 +464,56 @@ async def source_paper_title(
 # ══════════════════════════════════════════════════════════
 
 async def import_sources(client, notebook_id: str, sources: list[dict], task_id: str | None = None, source_mode: str = "research"):
-    """将来源导入到 NotebookLM 笔记本。"""
+    """将来源导入到 NotebookLM 笔记本。
+    
+    优化策略:
+    - 不限制来源数量 (Deep Research 发现多少就导入多少)
+    - 批量导入失败时，用较小批次重试再 fallback 到逐个添加
+    - 逐个添加时设置单个超时 (ADD_SOURCE_TIMEOUT_S)，避免长时间卡死
+    """
+    ADD_SOURCE_TIMEOUT_S = 45 # 单个 URL 添加超时（秒）
+
     if not sources:
         return 0
 
+    # 尝试批量导入 (research/mixed 模式)
     if source_mode in ("research", "mixed") and task_id:
-        batch_size = 15
         total_imported = 0
-        for i in range(0, len(sources), batch_size):
-            batch = sources[i:i + batch_size]
-            try:
-                imported = await client.research.import_sources(notebook_id, task_id, batch)
-                total_imported += len(imported)
-                info(f"批次 {i//batch_size+1}: 导入 {len(imported)} 个")
-            except Exception as e:
-                warn(f"批次 {i//batch_size+1} 导入失败 (已导入 {total_imported}): {e}")
+        # 先尝试大批次，失败则用小批次重试
+        for batch_size in (15, 5):
+            if total_imported > 0:
                 break
+            for i in range(0, len(sources), batch_size):
+                batch = sources[i:i + batch_size]
+                try:
+                    imported = await client.research.import_sources(notebook_id, task_id, batch)
+                    total_imported += len(imported)
+                    info(f"批次 {i//batch_size+1} (size={batch_size}): 导入 {len(imported)} 个")
+                except Exception as e:
+                    warn(f"批次 {i//batch_size+1} (size={batch_size}) 导入失败: {e}")
+                    if batch_size == 15:
+                        info("切换到小批次重试...")
+                    break
         if total_imported > 0:
             return total_imported
 
+    # Fallback: 逐个添加 (带超时)
     count = 0
+    total = len(sources)
     for s in sources:
         url = s.get("pdf_url") or s.get("url")
         if not url:
             continue
         try:
-            await client.sources.add_url(notebook_id, url=url)
+            await asyncio.wait_for(
+                client.sources.add_url(notebook_id, url=url),
+                timeout=ADD_SOURCE_TIMEOUT_S,
+            )
             count += 1
-            sys.stdout.write(f"\r    已添加 {count}/{len(sources)}...")
+            sys.stdout.write(f"\r    已添加 {count}/{total}...")
             sys.stdout.flush()
+        except asyncio.TimeoutError:
+            warn(f"添加超时 ({ADD_SOURCE_TIMEOUT_S}s) [{s.get('title', '')[:30]}]")
         except Exception as e:
             warn(f"添加失败 [{s.get('title', '')[:30]}]: {e}")
     if count:
@@ -513,7 +535,7 @@ async def run(
     max_results: int = 10,
     year: int | None = None,
     output_dir: str = "./output",
-    timeout: float = 1800.0,
+    timeout: float = 3600.0,
     instructions: str | None = None,
     no_confirm: bool = False,
     file_paths: list[str] | None = None,
@@ -543,7 +565,7 @@ async def run(
                 login_script = str(CLI_DIR / "tools" / "auto_login.py")
                 login_result = subprocess.run(
                     [sys.executable, login_script],
-                    timeout=360,
+                    timeout=720,
                 )
                 if login_result.returncode != 0:
                     err("自动登录失败，请手动运行: python tools/auto_login.py")
@@ -627,7 +649,8 @@ async def run(
         # ── Step 5: 等待来源处理 ──────────────────────────
         step(5, total, "等待来源处理...")
         if imported_count > 0:
-            wait_s = min(30 + imported_count * 5, 180)
+            # 动态等待: 基础30s + 每来源3s, 上限300s
+            wait_s = min(30 + imported_count * 3, 300)
             for i in range(wait_s):
                 sys.stdout.write(f"\r    等待中... {i+1}/{wait_s}s")
                 sys.stdout.flush()
@@ -751,7 +774,7 @@ async def run(
 
 async def resume_video(
     notebook_id: str, task_id: str, topic: str = "resume",
-    output_dir: str = "./output", timeout: float = 1800.0,
+    output_dir: str = "./output", timeout: float = 3600.0,
 ):
     out = Path(output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -779,7 +802,7 @@ async def resume_video(
                 login_script = str(CLI_DIR / "tools" / "auto_login.py")
                 login_result = subprocess.run(
                     [sys.executable, login_script],
-                    timeout=360,
+                    timeout=720,
                 )
                 if login_result.returncode != 0:
                     err("自动登录失败，请手动运行: python tools/auto_login.py")
@@ -893,7 +916,7 @@ def main():
     p.add_argument("topic", help="视频主题")
     p.add_argument("--source", default="research",
                    choices=["research", "search", "upload", "mixed", "file", "paper"],
-                   help="来源模式 (默认: research)")
+                   help="来源模式: research=NotebookLM检索, search=自主文献检索, file=本地文件 (默认: research)")
     p.add_argument("--files", nargs="+", default=None,
                    help="本地文件或目录路径 (用于 --source file)")
     p.add_argument("--style", default="whiteboard", choices=list(STYLE_MAP.keys()),
@@ -902,14 +925,14 @@ def main():
     p.add_argument("--mode", default="deep", choices=["fast", "deep"],
                    help="Deep Research 模式 (默认: deep)")
     p.add_argument("--platforms", nargs="+", default=None,
-                   help="论文搜索平台 (默认: arxiv semantic_scholar)")
+                   help="文献检索平台 (默认: arxiv semantic_scholar; 可选: crossref)")
     p.add_argument("--max-results", type=int, default=10,
                    help="每平台最大结果数 (默认: 10)")
     p.add_argument("--year", type=int, default=None,
                    help="论文年份筛选")
     p.add_argument("--output", default="./output", help="输出目录 (默认: ./output)")
-    p.add_argument("--timeout", type=float, default=1800.0,
-                   help="视频生成超时秒数 (默认: 1800 = 30分钟)")
+    p.add_argument("--timeout", type=float, default=3600.0,
+                   help="视频生成超时秒数 (默认: 3600 = 60分钟)")
     p.add_argument("--instructions", default=None,
                    help="自定义视频指令 (覆盖 video.md)")
     p.add_argument("--no-confirm", action="store_true",
@@ -918,6 +941,9 @@ def main():
                    help="仅检查 NotebookLM 连通性，不生成视频")
     p.add_argument("--resume", nargs=2, metavar=("NOTEBOOK_ID", "TASK_ID"),
                    help="恢复超时的视频生成")
+    p.add_argument("--publish", nargs="*", default=None,
+                   metavar="PLATFORM",
+                   help="生成后自动发布 (可指定平台: bilibili weixin_channels, 默认: bilibili weixin_channels)")
 
     a = p.parse_args()
 
@@ -940,7 +966,34 @@ def main():
         timeout=a.timeout, instructions=a.instructions, no_confirm=a.no_confirm,
         file_paths=a.files,
     ))
-    sys.exit(0 if result else 1)
+
+    if not result:
+        sys.exit(1)
+
+    # Auto-publish if --publish specified
+    if a.publish is not None:
+        publish_platforms = a.publish if a.publish else ["bilibili", "weixin_channels"]
+        print(f"\n{'='*60}")
+        print(f"  Phase 2: Auto-publishing to {', '.join(publish_platforms)}")
+        print(f"{'='*60}\n")
+
+        publish_cmd = [
+            sys.executable, "-u",
+            str(Path(__file__).resolve().parent / "publish.py"),
+            "--platforms", *publish_platforms,
+        ]
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+        try:
+            ret = subprocess.run(publish_cmd, env=env, timeout=3600,
+                                 cwd=str(Path(__file__).resolve().parent))
+            if ret.returncode != 0:
+                print(f"\n  Auto-publish failed (exit code {ret.returncode})")
+                sys.exit(1)
+        except subprocess.TimeoutExpired:
+            print(f"\n  Auto-publish timed out (60 min)")
+            sys.exit(1)
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":

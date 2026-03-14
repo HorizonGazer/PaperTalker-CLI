@@ -16,6 +16,7 @@ Designed for OpenClaw cron integration (see setup_cron.py).
 import argparse
 import asyncio
 import os
+import shlex
 import subprocess
 import sys
 from datetime import datetime
@@ -154,9 +155,34 @@ def mark_completed(entries: list[dict], topic_entry: dict, success: bool = True)
     save_schedule(entries)
 
     # Append to run_history.txt
-    history_line = f"{datetime.now().isoformat(timespec='seconds')}\t{topic_entry['topic']}\t{topic_entry['source_mode']}\t{'completed' if success else 'failed'}\n"
+    status = "completed" if success else "failed"
+    history_line = (
+        f"{datetime.now().isoformat(timespec='seconds')}\t"
+        f"{topic_entry['topic']}\t"
+        f"{topic_entry['source_mode']}\t"
+        f"{topic_entry.get('platforms', '')}\t"
+        f"{status}\n"
+    )
     with open(HISTORY_FILE, "a", encoding="utf-8") as f:
         f.write(history_line)
+
+
+def print_schedule_overview(entries: list[dict]):
+    """Print schedule overview before picking topic."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    pending = [e for e in entries if e["status"] == "pending"]
+    completed = [e for e in entries if e["status"] == "completed"]
+    failed = [e for e in entries if e["status"] == "failed"]
+
+    print(f"  {B}日程概览:{X} {len(pending)} 待执行 | {len(completed)} 已完成 | {len(failed)} 失败")
+
+    # Check for stale date-specific entries (past dates still pending)
+    stale = [e for e in pending if e["date"] != "queue" and e["date"] < today]
+    if stale:
+        print(f"  {Y}提醒: {len(stale)} 个过期未执行的主题{X}")
+        for e in stale:
+            print(f"    {D}{e['date']}  {e['topic'][:40]}{X}")
+    print()
 
 
 def get_python() -> str:
@@ -218,7 +244,7 @@ def run_phase2(defaults: dict) -> bool:
             cmd,
             cwd=str(PROJECT_ROOT),
             env=env,
-            timeout=1800,  # 30 min timeout
+            timeout=3600,  # 60 min timeout
         )
 
         if result.returncode == 0:
@@ -229,7 +255,7 @@ def run_phase2(defaults: dict) -> bool:
             return False
 
     except subprocess.TimeoutExpired:
-        print(f"\n  {R}Phase 2 timed out (30 min){X}")
+        print(f"\n  {R}Phase 2 timed out (60 min){X}")
         return False
     except Exception as e:
         print(f"\n  {R}Phase 2 error: {e}{X}")
@@ -241,13 +267,43 @@ async def main():
     parser.add_argument("--dry-run", action="store_true", help="Show what would run without executing")
     parser.add_argument("--force", type=str, help="Override with a specific topic")
     parser.add_argument("--skip-phase2", action="store_true", help="Only run Phase 1 (video generation)")
+    parser.add_argument("--json", action="store_true", help="Output machine-readable JSON result (for OpenClaw)")
+    parser.add_argument("--source-args", type=str, help="Extra args for quick_video.py source (JSON string)")
+    parser.add_argument("--publish-platforms", nargs="+", help="Override publish platforms (default from schedule)")
+    parser.add_argument("--pre-hook", type=str, help="Script to run before topic selection (e.g., 'auto_tracker.py --write-schedule')")
+    parser.add_argument("--post-hook", type=str, help="Script to run after pipeline completion")
     args = parser.parse_args()
 
     print(f"\n{B}PaperTalker Scheduled Run{X}")
     print(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print()
 
+    # ── Pre-hook (e.g., auto_tracker.py --write-schedule) ──
+    if args.pre_hook:
+        print(f"  {C}Running pre-hook:{X} {args.pre_hook}")
+        hook_env = os.environ.copy()
+        hook_env["PYTHONIOENCODING"] = "utf-8"
+        hook_env["PYTHONUNBUFFERED"] = "1"
+        try:
+            hook_result = subprocess.run(
+                [get_python(), "-u"] + shlex.split(args.pre_hook),
+                cwd=str(PROJECT_ROOT),
+                env=hook_env,
+                timeout=300,
+            )
+            if hook_result.returncode != 0:
+                print(f"  {Y}Pre-hook exited with code {hook_result.returncode}, continuing...{X}")
+        except subprocess.TimeoutExpired:
+            print(f"  {Y}Pre-hook timed out (300s), continuing...{X}")
+        except Exception as e:
+            print(f"  {Y}Pre-hook error: {e}, continuing...{X}")
+        print()
+
     entries = load_schedule()
+
+    # ── Schedule overview (pre-run check) ──
+    if entries:
+        print_schedule_overview(entries)
 
     # Determine topic
     if args.force:
@@ -270,7 +326,7 @@ async def main():
             return
 
     platforms_str = topic_entry.get("platforms", "bilibili")
-    platforms_list = [p.strip() for p in platforms_str.split(",")]
+    platforms_list = args.publish_platforms or [p.strip() for p in platforms_str.split(",")]
 
     print(f"  Topic: {C}{topic_entry['topic']}{X}")
     print(f"  Source mode: {topic_entry['source_mode']}")
@@ -309,12 +365,45 @@ async def main():
         print(f"\n  {G}Topic marked as completed in schedule.txt{X}")
 
     # Summary
-    print(f"\n{'='*60}")
-    print(f"  {B}Pipeline Summary{X}")
-    print(f"  Topic:   {topic_entry['topic']}")
-    print(f"  Phase 1: {'OK' if phase1_ok else 'FAIL'}")
-    print(f"  Phase 2: {'OK' if phase2_ok else 'FAIL'}")
-    print(f"{'='*60}\n")
+    summary = {
+        "topic": topic_entry["topic"],
+        "source_mode": topic_entry["source_mode"],
+        "platforms": platforms_list,
+        "phase1": "ok" if phase1_ok else "fail",
+        "phase2": "ok" if phase2_ok else ("skip" if args.skip_phase2 else "fail"),
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }
+
+    if args.json:
+        import json
+        print(json.dumps(summary, ensure_ascii=False))
+    else:
+        print(f"\n{'='*60}")
+        print(f"  {B}Pipeline Summary{X}")
+        print(f"  Topic:   {topic_entry['topic']}")
+        print(f"  Phase 1: {'OK' if phase1_ok else 'FAIL'}")
+        print(f"  Phase 2: {'OK' if phase2_ok else 'FAIL'}")
+        print(f"{'='*60}\n")
+
+    # ── Post-hook ──
+    if args.post_hook:
+        print(f"  {C}Running post-hook:{X} {args.post_hook}")
+        hook_env = os.environ.copy()
+        hook_env["PYTHONIOENCODING"] = "utf-8"
+        hook_env["PYTHONUNBUFFERED"] = "1"
+        try:
+            subprocess.run(
+                [get_python(), "-u"] + shlex.split(args.post_hook),
+                cwd=str(PROJECT_ROOT),
+                env=hook_env,
+                timeout=300,
+            )
+        except Exception as e:
+            print(f"  {Y}Post-hook error: {e}{X}")
+
+    # Exit code: 0 if both phases ok, 1 otherwise (for cron/OpenClaw)
+    if not phase1_ok or (not args.skip_phase2 and not phase2_ok):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

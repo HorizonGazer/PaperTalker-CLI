@@ -1,0 +1,49 @@
+[
+    {
+        "title": "CRISPR-Cas9 gene editing for sickle cell disease",
+        "authors": "Smith JD, Johnson ML, Williams KR",
+        "year": "2023",
+        "source": "PubMed",
+        "doi": "10.1038/nrd.2023.001",
+        "journal": "Nature Reviews Drug Discovery",
+        "abstract": "This study demonstrates the efficacy of CRISPR-Cas9 gene editing in treating sickle cell disease.",
+        "citations": 156
+    },
+    {
+        "title": "Advances in gene therapy for hemoglobin disorders",
+        "authors": "Zhang Y, Chen L, Wang H",
+        "year": "2024",
+        "source": "bioRxiv",
+        "doi": "10.1101/2024.01.001",
+        "abstract": "Preprint describing novel therapeutic targets in hemoglobin disorders.",
+        "citations": 23
+    },
+    {
+        "title": "CRISPR delivery methods for therapeutic applications",
+        "authors": "Brown AA, Davis BB, Lee CC",
+        "year": "2023",
+        "source": "PubMed",
+        "doi": "10.1038/nrd.2023.001",
+        "journal": "Nature Reviews Drug Discovery",
+        "abstract": "Comprehensive review of CRISPR delivery methods.",
+        "citations": 89
+    },
+    {
+        "title": "Machine learning approaches in drug discovery",
+        "authors": "Smith JD, Johnson ML, Williams KR",
+        "year": "2022",
+        "source": "Semantic Scholar",
+        "doi": "10.1016/j.drudis.2022.001",
+        "journal": "Drug Discovery Today",
+        "abstract": "Review of machine learning applications in pharmaceutical research.",
+        "citations": 234
+    },
+    {
+        "title": "Novel therapeutic targets in Alzheimer's disease",
+        "authors": "Zhang Y, Chen L, Wang H",
+        "year": "2024",
+        "source": "arXiv",
+        "abstract": "Computational analysis of potential drug targets for Alzheimer's disease.",
+        "citations": 12
+    }
+]

@@ -91,8 +91,8 @@ async def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: 
         # Navigate to upload page (will redirect to login if not authenticated)
         print(f"  {Y}正在打开发布页面...{X}", flush=True)
         try:
-            await page.goto("https://channels.weixin.qq.com/platform/post/create", timeout=30000)
-            await asyncio.sleep(5)
+            await page.goto("https://channels.weixin.qq.com/platform/post/create", timeout=60000)
+            await asyncio.sleep(2)
         except Exception as e:
             print(f"  {Y}导航异常: {e}，继续...{X}", flush=True)
 
@@ -106,21 +106,60 @@ async def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: 
             print(f"  {Y}请用微信扫描浏览器中的二维码登录{X}")
             print(f"  扫码后在手机上点击「确认登录」")
             print(f"  登录后会自动跳转到发布页面")
-            print(f"  等待登录中... (最多5分钟)")
+            print(f"  等待登录中... (最多10分钟)")
             print(f"  {'='*50}\n", flush=True)
 
             start = time.time()
             logged_in = False
             last_print = 0
-            while time.time() - start < 300:
+            reload_tried = False
+            while time.time() - start < 1200:
                 try:
                     current_url = page.url
-                    # Check if redirected to create page
-                    if "post/create" in current_url:
-                        logged_in = True
-                        print(f"  {G}✓✓ 扫码成功！已自动跳转到发布页面{X}", flush=True)
-                        print(f"  {G}当前URL: {current_url}{X}", flush=True)
-                        break
+                    # Check if redirected to create page (or any non-login page)
+                    if "post/create" in current_url or (
+                        "channels.weixin.qq.com" in current_url
+                        and "login" not in current_url.lower()
+                    ):
+                        # 3-level re-verify to avoid false positives
+                        print(f"  {Y}✓ 检测到页面跳转，验证登录状态...{X}", flush=True)
+                        await asyncio.sleep(0.3)
+                        url2 = page.url
+                        if "login" not in url2.lower():
+                            await asyncio.sleep(0.5)
+                            url3 = page.url
+                            if "login" not in url3.lower():
+                                logged_in = True
+                                print(f"  {G}✓✓ 扫码成功！已自动跳转到发布页面{X}", flush=True)
+                                print(f"  {G}当前URL: {url3}{X}", flush=True)
+                                # If not on create page, navigate there
+                                if "post/create" not in url3:
+                                    try:
+                                        await page.goto("https://channels.weixin.qq.com/platform/post/create", timeout=60000)
+                                        await asyncio.sleep(1)
+                                    except Exception:
+                                        pass
+                                break
+                            else:
+                                print(f"  {D}URL短暂变化后回退，继续等待...{X}", flush=True)
+                        else:
+                            print(f"  {D}URL短暂变化后回退，继续等待...{X}", flush=True)
+
+                    # If page seems stuck after scanning, try reload once
+                    elapsed = int(time.time() - start)
+                    if elapsed > 60 and not reload_tried:
+                        try:
+                            # Check if QR code is still visible (user already scanned but page stuck)
+                            qr_el = await page.query_selector(".login__type__container__scan__qrcode")
+                            if qr_el is None:
+                                # QR gone but still on login page — likely stuck after scan
+                                print(f"  {Y}检测到扫码后页面未跳转，尝试刷新...{X}", flush=True)
+                                await page.reload(timeout=60000)
+                                await asyncio.sleep(2)
+                                reload_tried = True
+                        except Exception:
+                            pass
+
                 except Exception as e:
                     print(f"  {Y}检测异常: {e}{X}", flush=True)
 
@@ -128,10 +167,10 @@ async def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: 
                 if elapsed >= last_print + 10:
                     print(f"  等待扫码... ({elapsed}s)", flush=True)
                     last_print = elapsed
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.2)
 
             if not logged_in:
-                print(f"  {R}登录超时 (5分钟){X}", flush=True)
+                print(f"  {R}登录超时 (10分钟){X}", flush=True)
                 await context.close()
                 await p.stop()
                 return {"ok": False, "error": "Login timeout"}
@@ -146,8 +185,8 @@ async def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: 
             else:
                 # Navigate to create page
                 print(f"  {Y}正在跳转到发布页面...{X}", flush=True)
-                await page.goto("https://channels.weixin.qq.com/platform/post/create", timeout=30000)
-                await asyncio.sleep(3)
+                await page.goto("https://channels.weixin.qq.com/platform/post/create", timeout=60000)
+                await asyncio.sleep(1)
                 current_url = page.url
                 if "post/create" in current_url:
                     print(f"  {G}✓ 已到达发布页面{X}", flush=True)
@@ -186,7 +225,7 @@ async def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: 
         # Wait for file input
         file_input_found = False
         try:
-            await upload_frame.wait_for_selector('input[type="file"]', timeout=30000, state="attached")
+            await upload_frame.wait_for_selector('input[type="file"]', timeout=60000, state="attached")
             file_input_found = True
         except Exception:
             pass
@@ -207,35 +246,48 @@ async def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: 
 
         await asyncio.sleep(2)
 
-        # Step 1: Upload video via file chooser
+        # Step 1: Upload video via set_input_files (bypasses file chooser dialog)
         try:
-            async with page.expect_file_chooser(timeout=10000) as fc_info:
-                # Try clicking via JavaScript first
-                clicked = False
-                for frame in [upload_frame] + list(page.frames):
-                    try:
-                        fi_count = await frame.locator('input[type="file"]').count()
-                        if fi_count > 0:
-                            await frame.evaluate('document.querySelector("input[type=\\"file\\"]").click()')
-                            clicked = True
-                            break
-                    except Exception:
-                        continue
-                if not clicked:
-                    await context.close()
-                    await p.stop()
-                    return {"ok": False, "error": "Cannot find file input"}
-        except Exception as e:
-            await context.close()
-            await p.stop()
-            return {"ok": False, "error": f"File chooser failed: {e}"}
+            file_input = None
+            for frame in [upload_frame] + list(page.frames):
+                try:
+                    fi = frame.locator('input[type="file"]')
+                    if await fi.count() > 0:
+                        file_input = fi.first
+                        break
+                except Exception:
+                    continue
 
-        file_chooser = await fc_info.value
-        await file_chooser.set_files(str(video_path))
-        print(f"    视频已选择，等待上传...", flush=True)
+            if not file_input:
+                await context.close()
+                await p.stop()
+                return {"ok": False, "error": "Cannot find file input"}
+
+            await file_input.set_input_files(str(video_path))
+            print(f"    视频已选择，等待上传...", flush=True)
+        except Exception as e:
+            # Fallback: try file chooser approach
+            print(f"    set_input_files失败({e})，尝试file chooser...", flush=True)
+            try:
+                async with page.expect_file_chooser(timeout=20000) as fc_info:
+                    for frame in [upload_frame] + list(page.frames):
+                        try:
+                            fi_count = await frame.locator('input[type="file"]').count()
+                            if fi_count > 0:
+                                await frame.evaluate('document.querySelector("input[type=\\"file\\"]").click()')
+                                break
+                        except Exception:
+                            continue
+                file_chooser = await fc_info.value
+                await file_chooser.set_files(str(video_path))
+                print(f"    视频已选择(file chooser)，等待上传...", flush=True)
+            except Exception as e2:
+                await context.close()
+                await p.stop()
+                return {"ok": False, "error": f"File upload failed: {e2}"}
 
         # Step 2: Wait for upload to complete
-        max_upload_wait = 300
+        max_upload_wait = 600
         start = time.time()
         upload_done = False
         while time.time() - start < max_upload_wait:
@@ -317,7 +369,7 @@ async def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: 
             print(f"    发表按钮: 找到 {btn_count} 个", flush=True)
 
             if btn_count > 0:
-                max_wait_publish = 300  # 5 min — large videos need server processing
+                max_wait_publish = 600  # 10 min — large videos need server processing
                 is_disabled = True
                 for wait_i in range(max_wait_publish // 5):
                     cls = await publish_btn.first.get_attribute("class") or ""

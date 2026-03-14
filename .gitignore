@@ -46,8 +46,9 @@ output_subtitled/
 # Cookies and credentials
 cookies/
 
-# Vendor binaries
+# Vendor binaries (platform-specific, downloaded separately)
 vendor/
+!vendor/.gitkeep
 
 # NotebookLM authentication
 .notebooklm/
@@ -71,6 +72,7 @@ desktop.ini
 # Logs
 *.log
 run_history.txt
+tracker_history.txt
 
 # Temporary files
 *.tmp

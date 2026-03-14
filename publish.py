@@ -50,6 +50,17 @@ WEIXIN_STORAGE_STATE = PROJECT_ROOT / "cookies" / "weixin" / "storage_state.json
 WEIXIN_MP_PROFILE_DIR = PROJECT_ROOT / "cookies" / "weixin_mp" / "browser_profile"
 RUN_HISTORY_FILE = PROJECT_ROOT / "skills" / "paper-talker" / "references" / "run_history.json"
 
+def _get_biliup_exe() -> Path:
+    """Get platform-specific biliup binary path."""
+    import platform as _plat
+    vendor = PROJECT_ROOT / "vendor"
+    if sys.platform == "win32":
+        return vendor / "biliup.exe"
+    elif _plat.system() == "Darwin":
+        return vendor / "biliup-macos"
+    else:
+        return vendor / "biliup"
+
 # Subtitle display limits
 MAX_CHARS_PER_LINE = 18  # Max Chinese chars per subtitle line (screen width)
 MAX_DURATION_PER_SUB = 6.0  # Max seconds a single subtitle can display
@@ -227,7 +238,7 @@ def preflight_check() -> bool:
     if COOKIE_FILE.exists():
         print(f"  {G}ok{X}   bilibili cookies")
     else:
-        biliup_exe = PROJECT_ROOT / "vendor" / "biliup.exe"
+        biliup_exe = _get_biliup_exe()
         if biliup_exe.exists():
             print(f"  {Y}MISS{X} bilibili cookies (will auto-login before upload)")
         else:
@@ -262,96 +273,23 @@ def extract_audio(ffmpeg: str, video_path: Path, wav_path: Path) -> bool:
     return result.returncode == 0
 
 
-def transcribe(wav_path: Path) -> list:
-    """Transcribe audio using faster-whisper with word-level timestamps.
+def transcribe(wav_path: Path, workers: int = 3) -> list:
+    """Transcribe audio using faster-whisper with parallel chunk processing.
 
-    Runs in a dedicated subprocess to isolate GPU/CPU memory.
-    GPU (large-v3 float16) preferred; falls back to CPU (small int8).
+    Delegates to src/transcribe.transcribe_parallel() which splits audio into
+    overlapping chunks, transcribes each in a separate subprocess, then merges.
+
+    Args:
+        wav_path: Path to 16kHz mono WAV file
+        workers: Number of parallel workers (default: 3, 1=no split)
     """
-    import pickle, tempfile
+    # Import from src/transcribe.py (shared implementation)
+    src_dir = Path(__file__).resolve().parent / "src"
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+    from transcribe import transcribe_parallel, verify_segments
 
-    # Write a standalone transcription script to a temp file
-    # (avoids f-string escaping issues and ensures clean process)
-    script_content = '''
-import os, sys, pickle
-os.environ["MKL_THREADING_LAYER"] = "sequential"
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-
-from faster_whisper import WhisperModel
-
-# Detect GPU availability
-try:
-    import ctranslate2
-    _has_cuda = "cuda" in ctranslate2.get_supported_compute_types("cuda")
-except Exception:
-    _has_cuda = False
-
-_device = "cuda" if _has_cuda else "cpu"
-_ctype = "float16" if _has_cuda else "int8"
-_model = "large-v3" if _has_cuda else "small"
-print(f"  whisper: {_model} on {_device} ({_ctype})", flush=True)
-
-model = WhisperModel(_model, device=_device, compute_type=_ctype)
-segments, info = model.transcribe(
-    sys.argv[1], language="zh", beam_size=5,
-    vad_filter=True, vad_parameters=dict(min_silence_duration_ms=500),
-    word_timestamps=True,
-    initial_prompt="以下是普通话的句子，使用简体中文。",
-)
-seg_list = list(segments)
-
-data = []
-for s in seg_list:
-    d = {"start": s.start, "end": s.end, "text": s.text}
-    if hasattr(s, "words") and s.words:
-        d["words"] = [{"start": w.start, "end": w.end, "word": w.word} for w in s.words]
-    data.append(d)
-
-with open(sys.argv[2], "wb") as f:
-    pickle.dump(data, f)
-'''
-    with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w",
-                                     encoding="utf-8") as script_f:
-        script_f.write(script_content)
-        script_path = script_f.name
-
-    with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
-        pkl_path = tmp.name
-
-    try:
-        result = subprocess.run(
-            [sys.executable, script_path, str(wav_path), pkl_path],
-            capture_output=True, text=True, timeout=600,
-            env={**os.environ, "PYTHONIOENCODING": "utf-8",
-                 "MKL_THREADING_LAYER": "sequential",
-                 "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
-        )
-        # Print subprocess info line (model/device)
-        for line in (result.stdout or "").strip().splitlines():
-            if line.strip().startswith("whisper:"):
-                print(f"\n  {D}  {line.strip()}{X}", end="", flush=True)
-
-        if Path(pkl_path).exists() and Path(pkl_path).stat().st_size > 0:
-            with open(pkl_path, "rb") as f:
-                data = pickle.load(f)
-
-            class Seg:
-                def __init__(self, d):
-                    self.start = d["start"]
-                    self.end = d["end"]
-                    self.text = d["text"]
-                    self.words = None
-                    if "words" in d:
-                        self.words = [type("W", (), w) for w in d["words"]]
-            return [Seg(d) for d in data]
-
-        # Subprocess failed — raise with stderr
-        err = (result.stderr or "").strip().split("\n")
-        raise RuntimeError(err[-1] if err else "transcription subprocess failed")
-    finally:
-        Path(script_path).unlink(missing_ok=True)
-        Path(pkl_path).unlink(missing_ok=True)
+    return transcribe_parallel(wav_path, workers=workers)
 
 
 def seconds_to_srt(s: float) -> str:
@@ -666,7 +604,7 @@ def _qr_login_api() -> bool:
             params = _sign({"appkey": _APP_KEY, "local_id": "0", "ts": int(time.time())})
             resp = session.post(
                 "http://passport.bilibili.com/x/passport-tv-login/qrcode/auth_code",
-                data=params, timeout=10,
+                data=params, timeout=20,
             )
             r = resp.json()
             if r and r.get("code") == 0:
@@ -674,8 +612,7 @@ def _qr_login_api() -> bool:
         except Exception as e:
             if attempt < 2:
                 print(f"  {D}QR请求失败 (retry {attempt+1}/3): {e}{X}")
-                time.sleep(2)
-            else:
+                time.sleep(1)
                 raise RuntimeError(f"QR request failed after 3 retries: {e}")
     if not r or r.get("code") != 0:
         raise RuntimeError(f"QR request failed: {r}")
@@ -694,9 +631,9 @@ def _qr_login_api() -> bool:
         print(f"  {D}（qrcode库不可用，请手动打开链接）{X}")
         print(f"  {D}{url}{X}")
 
-    print(f"\n  {D}等待扫码... (最多120秒){X}", flush=True)
+    print(f"\n  {D}等待扫码... (最多240秒){X}", flush=True)
 
-    # Step 3 — poll until scanned or timeout (120 s)
+    # Step 3 — poll until scanned or timeout (240 s)
     # B站 TV QR poll response codes:
     #   0     = login success
     #   86038 = QR not scanned yet
@@ -707,12 +644,12 @@ def _qr_login_api() -> bool:
         "local_id": "0", "ts": int(time.time()),
     })
     scanned_notified = False
-    for i in range(120):
-        time.sleep(0.5)  # Poll faster for responsive detection
+    for i in range(480):
+        time.sleep(0.25)  # Poll fast for responsive detection
         try:
             resp = session.post(
                 "http://passport.bilibili.com/x/passport-tv-login/qrcode/poll",
-                data=poll_params, timeout=5,
+                data=poll_params, timeout=10,
             ).json()
             code = resp.get("code", -1) if resp else -1
 
@@ -736,7 +673,7 @@ def _qr_login_api() -> bool:
         if i % 10 == 9 and not scanned_notified:
             print(f"  {D}等待扫码... ({(i+1)//2}s){X}", flush=True)
 
-    print(f"  {R}登录超时 (120s){X}", flush=True)
+    print(f"  {R}登录超时 (240s){X}", flush=True)
     return False
 
 
@@ -780,12 +717,12 @@ def ensure_weixin_login() -> bool:
             create_url = "https://channels.weixin.qq.com/platform/post/create"
             print(f"  {Y}正在打开发布页面...{X}", flush=True)
             try:
-                page.goto(create_url, timeout=30000)
+                page.goto(create_url, timeout=60000)
             except Exception as e:
                 print(f"  {Y}导航异常: {e}，继续...{X}", flush=True)
 
             import time
-            time.sleep(3)
+            time.sleep(1)
             current_url = page.url
             print(f"  当前URL: {current_url}", flush=True)
 
@@ -796,25 +733,29 @@ def ensure_weixin_login() -> bool:
                 print(f"  {Y}请用微信扫描浏览器中的二维码登录{X}")
                 print(f"  扫码后在手机上点击「确认登录」")
                 print(f"  登录后会自动跳转到发布页面")
-                print(f"  等待登录中... (最多5分钟)")
+                print(f"  等待登录中... (最多10分钟)")
                 print(f"  {'='*50}\n", flush=True)
 
-                max_wait = 300
+                max_wait = 600
                 start = time.time()
                 logged_in = False
                 last_print = 0
+                reload_tried = False
                 while time.time() - start < max_wait:
                     url = page.url
-                    # Check if redirected to post/create (indicates successful login)
-                    if "post/create" in url:
+                    # Check if redirected to post/create (or any non-login page)
+                    if "post/create" in url or (
+                        "channels.weixin.qq.com" in url
+                        and "login" not in url.lower()
+                    ):
                         # 3-second re-verify to avoid false positives
                         print(f"  {Y}✓ 检测到页面跳转，验证登录状态...{X}", flush=True)
-                        time.sleep(1)
+                        time.sleep(0.3)
                         url2 = page.url
-                        if "post/create" in url2:
-                            time.sleep(2)
+                        if "login" not in url2.lower():
+                            time.sleep(0.5)
                             url3 = page.url
-                            if "post/create" in url3:
+                            if "login" not in url3.lower():
                                 logged_in = True
                                 print(f"  {G}✓✓ 扫码成功！已自动跳转到发布页面{X}", flush=True)
                                 print(f"  {G}当前URL: {url3}{X}", flush=True)
@@ -823,14 +764,28 @@ def ensure_weixin_login() -> bool:
                                 print(f"  {D}URL短暂变化后回退，继续等待...{X}", flush=True)
                         else:
                             print(f"  {D}URL短暂变化后回退，继续等待...{X}", flush=True)
+
+                    # If page seems stuck after scanning, try reload once
+                    elapsed_s = int(time.time() - start)
+                    if elapsed_s > 60 and not reload_tried:
+                        try:
+                            qr_el = page.query_selector(".login__type__container__scan__qrcode")
+                            if qr_el is None and "login" in page.url.lower():
+                                print(f"  {Y}检测到扫码后页面未跳转，尝试刷新...{X}", flush=True)
+                                page.reload(timeout=60000)
+                                time.sleep(2)
+                                reload_tried = True
+                        except Exception:
+                            pass
+
                     elapsed = int(time.time() - start)
                     if elapsed >= last_print + 10:
                         print(f"  {D}等待扫码... ({elapsed}s){X}", flush=True)
                         last_print = elapsed
-                    time.sleep(0.5)  # Poll every 0.5s for auto-redirect detection
+                    time.sleep(0.2)  # Poll every 0.2s for auto-redirect detection
 
                 if not logged_in:
-                    print(f"  {R}登录超时 (5分钟){X}", flush=True)
+                    print(f"  {R}登录超时 (10分钟){X}", flush=True)
                     context.close()
                     return False
 
@@ -881,11 +836,11 @@ def ensure_weixin_mp_login() -> bool:
             page = context.pages[0] if context.pages else context.new_page()
 
             try:
-                page.goto("https://mp.weixin.qq.com/", timeout=30000)
+                page.goto("https://mp.weixin.qq.com/", timeout=60000)
             except Exception:
                 pass
             try:
-                page.wait_for_load_state("networkidle", timeout=15000)
+                page.wait_for_load_state("networkidle", timeout=30000)
             except Exception:
                 pass
 
@@ -901,10 +856,10 @@ def ensure_weixin_mp_login() -> bool:
                 print(f"\n  {'='*50}")
                 print(f"  {Y}请用微信扫描浏览器中的二维码登录公众号{X}")
                 print(f"  扫码后在手机上点击「确认登录」")
-                print(f"  等待登录中... (最多5分钟)")
+                print(f"  等待登录中... (最多10分钟)")
                 print(f"  {'='*50}\n", flush=True)
 
-                max_wait = 300
+                max_wait = 600
                 start = time.time()
                 logged_in = False
                 last_print = 0
@@ -913,10 +868,10 @@ def ensure_weixin_mp_login() -> bool:
                     if "cgi-bin" in url:
                         # 3-second re-verify to avoid false positives
                         print(f"  {Y}✓ 检测到页面跳转，验证登录状态...{X}", flush=True)
-                        time.sleep(1)
+                        time.sleep(0.3)
                         url2 = page.url
                         if "cgi-bin" in url2:
-                            time.sleep(2)
+                            time.sleep(0.5)
                             url3 = page.url
                             if "cgi-bin" in url3:
                                 logged_in = True
@@ -929,10 +884,10 @@ def ensure_weixin_mp_login() -> bool:
                     if elapsed >= last_print + 10:
                         print(f"  {D}等待扫码... ({elapsed}s){X}", flush=True)
                         last_print = elapsed
-                    time.sleep(0.3)
+                    time.sleep(0.2)
 
                 if not logged_in:
-                    print(f"  {R}公众号登录超时 (5分钟){X}", flush=True)
+                    print(f"  {R}公众号登录超时 (10分钟){X}", flush=True)
                     context.close()
                     return False
 
@@ -1004,12 +959,12 @@ def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: str, c
 
             # Navigate to upload page (will redirect to login if not authenticated)
             try:
-                page.goto("https://channels.weixin.qq.com/platform/post/create", timeout=30000)
+                page.goto("https://channels.weixin.qq.com/platform/post/create", timeout=60000)
             except Exception:
                 pass
 
             try:
-                page.wait_for_load_state("networkidle", timeout=15000)
+                page.wait_for_load_state("networkidle", timeout=30000)
             except Exception:
                 pass
             time.sleep(2)
@@ -1021,40 +976,62 @@ def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: str, c
                 print(f"\n  {'='*50}")
                 print(f"  {Y}请用微信扫描浏览器中的二维码登录{X}")
                 print(f"  扫码后在手机上点击「确认登录」")
-                print(f"  等待登录中... (最多5分钟)")
+                print(f"  等待登录中... (最多10分钟)")
                 print(f"  {'='*50}\n", flush=True)
 
-                max_wait = 300
+                max_wait = 600
                 start = time.time()
                 logged_in = False
                 last_print = 0
+                reload_tried = False
                 while time.time() - start < max_wait:
                     url = page.url
                     if "login" not in url.lower():
                         # 3-second re-verify to avoid false positives
                         print(f"  {Y}✓ 检测到页面跳转，验证登录状态...{X}", flush=True)
-                        time.sleep(1)
+                        time.sleep(0.3)
                         url2 = page.url
                         if "login" not in url2.lower():
-                            time.sleep(2)
+                            time.sleep(0.5)
                             url3 = page.url
                             if "login" not in url3.lower():
                                 logged_in = True
                                 print(f"  {G}✓✓ 扫码成功！登录状态已确认{X}", flush=True)
                                 print(f"  {G}登录后URL: {url3}{X}", flush=True)
+                                # Navigate to create page if not already there
+                                if "post/create" not in url3:
+                                    try:
+                                        page.goto("https://channels.weixin.qq.com/platform/post/create", timeout=60000)
+                                        time.sleep(1)
+                                    except Exception:
+                                        pass
                                 break
                             else:
                                 print(f"  {D}URL短暂变化后回退，继续等待...{X}", flush=True)
                         else:
                             print(f"  {D}URL短暂变化后回退，继续等待...{X}", flush=True)
+
+                    # If page stuck after scanning, try reload
+                    elapsed_s = int(time.time() - start)
+                    if elapsed_s > 60 and not reload_tried:
+                        try:
+                            qr_el = page.query_selector(".login__type__container__scan__qrcode")
+                            if qr_el is None and "login" in page.url.lower():
+                                print(f"  {Y}检测到扫码后页面未跳转，尝试刷新...{X}", flush=True)
+                                page.reload(timeout=60000)
+                                time.sleep(2)
+                                reload_tried = True
+                        except Exception:
+                            pass
+
                     elapsed = int(time.time() - start)
                     if elapsed >= last_print + 10:
                         print(f"  {D}等待扫码... ({elapsed}s){X}", flush=True)
                         last_print = elapsed
-                    time.sleep(0.3)  # Fast polling for responsive detection
+                    time.sleep(0.15)  # Fast polling for responsive detection
 
                 if not logged_in:
-                    print(f"  {R}登录超时 (5分钟){X}", flush=True)
+                    print(f"  {R}登录超时 (10分钟){X}", flush=True)
                     context.close()
                     return {"ok": False, "error": "Login timeout"}
 
@@ -1064,11 +1041,11 @@ def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: str, c
 
                 # Navigate to upload page after login
                 try:
-                    page.goto("https://channels.weixin.qq.com/platform/post/create", timeout=30000)
+                    page.goto("https://channels.weixin.qq.com/platform/post/create", timeout=60000)
                 except Exception:
                     pass
                 try:
-                    page.wait_for_load_state("networkidle", timeout=15000)
+                    page.wait_for_load_state("networkidle", timeout=30000)
                 except Exception:
                     pass
                 time.sleep(2)
@@ -1093,7 +1070,7 @@ def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: str, c
 
             # Wait for file input to appear inside iframe
             try:
-                upload_frame.wait_for_selector('input[type="file"]', timeout=30000, state="attached")
+                upload_frame.wait_for_selector('input[type="file"]', timeout=60000, state="attached")
             except Exception:
                 pass
             time.sleep(2)
@@ -1102,7 +1079,7 @@ def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: str, c
             # The file input is hidden, so we trigger it and intercept the file chooser
             # File chooser listener must be on page, not frame
 
-            with page.expect_file_chooser(timeout=10000) as fc_info:
+            with page.expect_file_chooser(timeout=20000) as fc_info:
                 # Trigger the file input click via JavaScript in the iframe
                 upload_frame.evaluate('document.querySelector("input[type=\\"file\\"]").click()')
 
@@ -1112,7 +1089,7 @@ def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: str, c
 
             # Step 2: Wait for upload to complete
             # Check if video preview appears (indicates upload finished)
-            max_upload_wait = 300  # 5 min max for upload (large videos need more time)
+            max_upload_wait = 600  # 10 min max for upload (large videos need more time)
             start = time.time()
             upload_done = False
             while time.time() - start < max_upload_wait:
@@ -1232,7 +1209,7 @@ def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: str, c
                             print(f"    [DEBUG] 错误提示: {error_msgs.nth(ei).text_content()}")
 
                     # Poll until publish button is enabled (video may still be processing)
-                    max_wait_publish = 180  # wait up to 3 minutes for video processing
+                    max_wait_publish = 360  # wait up to 6 minutes for video processing
                     is_disabled = True
                     for wait_i in range(max_wait_publish // 5):
                         cls = publish_btn.first.get_attribute("class") or ""
@@ -1314,10 +1291,10 @@ def upload_weixin_channels(video_path: Path, title: str, desc: str, tags: str, c
                 if verify_dialog.count() > 0 and verify_dialog.is_visible():
                     print(f"\n  {'='*50}")
                     print(f"  需要管理员扫码验证，请用微信扫描弹窗中的二维码")
-                    print(f"  等待验证... (最多2分钟)")
+                    print(f"  等待验证... (最多4分钟)")
                     print(f"  {'='*50}\n")
                     # Wait for dialog to disappear
-                    max_verify = 120
+                    max_verify = 240
                     v_start = time.time()
                     while time.time() - v_start < max_verify:
                         if verify_dialog.count() == 0 or not verify_dialog.is_visible():
@@ -1425,7 +1402,7 @@ def _upload_weixin_article_api(title: str, desc: str, html_content: str, cover_p
         token_resp = requests.get(
             "https://api.weixin.qq.com/cgi-bin/token",
             params={"grant_type": "client_credential", "appid": appid, "secret": appsecret},
-            timeout=10,
+            timeout=20,
         ).json()
 
         if "access_token" not in token_resp:
@@ -1439,7 +1416,7 @@ def _upload_weixin_article_api(title: str, desc: str, html_content: str, cover_p
                 files = {"media": (Path(cover_path).name, f, "image/jpeg")}
                 upload_resp = requests.post(
                     f"https://api.weixin.qq.com/cgi-bin/material/add_material?access_token={access_token}&type=image",
-                    files=files, timeout=30,
+                    files=files, timeout=60,
                 ).json()
                 thumb_media_id = upload_resp.get("media_id")
 
@@ -1458,7 +1435,7 @@ def _upload_weixin_article_api(title: str, desc: str, html_content: str, cover_p
 
         draft_resp = requests.post(
             f"https://api.weixin.qq.com/cgi-bin/draft/add?access_token={access_token}",
-            json=draft_data, timeout=30,
+            json=draft_data, timeout=60,
         ).json()
 
         if "media_id" not in draft_resp:
@@ -1468,7 +1445,7 @@ def _upload_weixin_article_api(title: str, desc: str, html_content: str, cover_p
 
         publish_resp = requests.post(
             f"https://api.weixin.qq.com/cgi-bin/freepublish/submit?access_token={access_token}",
-            json={"media_id": media_id}, timeout=30,
+            json={"media_id": media_id}, timeout=60,
         ).json()
 
         if publish_resp.get("errcode") != 0:
@@ -1496,7 +1473,7 @@ def _run_weixin_mp_subprocess(title: str, content_html: str, cover_path: str = N
     try:
         proc = subprocess.run(
             [sys.executable, "-u", str(worker_script), args_json, str(result_file)],
-            timeout=600,
+            timeout=1200,
             env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"},
         )
         if result_file.exists():
@@ -1508,7 +1485,7 @@ def _run_weixin_mp_subprocess(title: str, content_html: str, cover_path: str = N
         else:
             return {"ok": False, "error": "No result from subprocess"}
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "Upload timeout (10min)"}
+        return {"ok": False, "error": "Upload timeout (20min)"}
     except Exception as e:
         return {"ok": False, "error": f"Subprocess error: {e}"}
     finally:
@@ -1516,61 +1493,103 @@ def _run_weixin_mp_subprocess(title: str, content_html: str, cover_path: str = N
 
 
 def _qr_login_bat() -> bool:
-    """Fallback: launch biliup.exe login via temp .bat (user selects menu)."""
+    """Fallback: launch biliup CLI login in a new terminal (Windows/macOS/Linux)."""
     import time
 
-    biliup_exe = PROJECT_ROOT / "vendor" / "biliup.exe"
+    biliup_exe = _get_biliup_exe()
     if not biliup_exe.exists():
-        print(f"  {R}MISS{X} vendor/biliup.exe")
+        print(f"  {R}MISS{X} {biliup_exe}")
+        print(f"  {D}下载: https://github.com/biliup/biliup-rs/releases{X}")
         return False
 
     print(f"  {Y}正在弹出登录窗口...{X}")
     print(f"  {D}请在弹出的终端中选择「扫码登录」并用B站App扫码{X}")
 
-    bat_content = (
-        f'@echo off\n'
-        f'echo ========================================\n'
-        f'echo    B站登录 - 请选择「扫码登录」\n'
-        f'echo ========================================\n'
-        f'echo.\n'
-        f'"{biliup_exe}" -u "{COOKIE_FILE}" login\n'
-        f'echo.\n'
-        f'echo 登录完成，此窗口可关闭。\n'
-        f'pause\n'
-    )
-    bat_path = PROJECT_ROOT / "vendor" / "_bilibili_login.bat"
-    bat_path.write_text(bat_content, encoding="utf-8")
-
-    try:
-        if sys.platform == "win32":
+    if sys.platform == "win32":
+        bat_content = (
+            f'@echo off\n'
+            f'echo ========================================\n'
+            f'echo    B站登录 - 请选择「扫码登录」\n'
+            f'echo ========================================\n'
+            f'echo.\n'
+            f'"{biliup_exe}" -u "{COOKIE_FILE}" login\n'
+            f'echo.\n'
+            f'echo 登录完成，此窗口可关闭。\n'
+            f'pause\n'
+        )
+        bat_path = PROJECT_ROOT / "vendor" / "_bilibili_login.bat"
+        bat_path.write_text(bat_content, encoding="utf-8")
+        try:
             subprocess.Popen(
                 f'start "B站登录" cmd /c "{bat_path}"',
                 shell=True, cwd=str(PROJECT_ROOT / "vendor"),
             )
-        else:
-            login_cmd = f'"{biliup_exe}" -u "{COOKIE_FILE}" login'
+        except Exception as e:
+            print(f"  {R}启动登录窗口失败: {e}{X}")
+            bat_path.unlink(missing_ok=True)
+            return False
+    else:
+        # macOS / Linux: launch in new terminal
+        import platform as _plat
+        login_cmd = f'"{biliup_exe}" -u "{COOKIE_FILE}" login'
+        launched = False
+
+        if _plat.system() == "Darwin":
+            # macOS: ensure binary is executable, then use Terminal.app
+            try:
+                import os
+                os.chmod(str(biliup_exe), 0o755)
+            except Exception:
+                pass
             for term_cmd in [
-                ["gnome-terminal", "--", "bash", "-c", login_cmd],
-                ["xterm", "-e", login_cmd],
+                ["open", "-a", "Terminal", str(biliup_exe), "--args", "-u", str(COOKIE_FILE), "login"],
+                ["osascript", "-e", f'tell application "Terminal" to do script "{login_cmd}"'],
             ]:
                 try:
                     subprocess.Popen(term_cmd, cwd=str(PROJECT_ROOT / "vendor"))
+                    launched = True
+                    break
+                except (FileNotFoundError, Exception):
+                    continue
+        else:
+            # Linux
+            for term_cmd in [
+                ["gnome-terminal", "--", "bash", "-c", login_cmd],
+                ["xterm", "-e", login_cmd],
+                ["konsole", "-e", "bash", "-c", login_cmd],
+            ]:
+                try:
+                    subprocess.Popen(term_cmd, cwd=str(PROJECT_ROOT / "vendor"))
+                    launched = True
                     break
                 except FileNotFoundError:
                     continue
 
-        for i in range(120):
+        if not launched:
+            # No GUI terminal: run inline
+            print(f"  {Y}无法打开新终端，在当前终端执行登录...{X}")
+            result = subprocess.run(
+                [str(biliup_exe), "-u", str(COOKIE_FILE), "login"],
+                cwd=str(PROJECT_ROOT / "vendor"),
+            )
+            return result.returncode == 0 and COOKIE_FILE.exists()
+
+    # Poll for cookie file creation
+    try:
+        for i in range(800):
             if COOKIE_FILE.exists() and COOKIE_FILE.stat().st_size > 10:
                 print(f"  {G}B站登录成功!{X}")
                 return True
-            time.sleep(1)
-            if i % 10 == 9:
-                print(f"  {D}等待扫码... ({i+1}s){X}")
+            time.sleep(0.3)
+            if i % 33 == 32:
+                print(f"  {D}等待扫码... ({int(i*0.3)+1}s){X}")
 
-        print(f"  {R}登录超时 (120s){X}")
+        print(f"  {R}登录超时 (240s){X}")
         return False
     finally:
-        bat_path.unlink(missing_ok=True)
+        if sys.platform == "win32":
+            bat_path = PROJECT_ROOT / "vendor" / "_bilibili_login.bat"
+            bat_path.unlink(missing_ok=True)
 
 
 def upload_bilibili(video_path, title: str, desc: str, tags: str,
@@ -1594,7 +1613,7 @@ def upload_bilibili(video_path, title: str, desc: str, tags: str,
         data.title = title[:80]  # B站 title limit
         data.desc = desc[:250]   # B站 desc limit
         data.tid = 201  # 科学科普
-        data.tag = tags
+        data.tag = ','.join(tags) if isinstance(tags, list) else tags
         data.dtime = 0
 
         with BiliBili(data) as bili:
@@ -1665,7 +1684,7 @@ def _run_weixin_channels_subprocess(video_path: Path, title: str, desc: str, tag
     try:
         proc = subprocess.run(
             [sys.executable, "-u", str(worker_script), args_json, str(result_file)],
-            timeout=600,
+            timeout=1200,
             env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"},
         )
         if result_file.exists():
@@ -1677,7 +1696,7 @@ def _run_weixin_channels_subprocess(video_path: Path, title: str, desc: str, tag
         else:
             return {"ok": False, "error": "No result from subprocess"}
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "Upload timeout (10min)"}
+        return {"ok": False, "error": "Upload timeout (20min)"}
     except Exception as e:
         return {"ok": False, "error": f"Subprocess error: {e}"}
     finally:
@@ -1694,6 +1713,7 @@ def process_video(
     ffmpeg: str,
     platforms: list[str],
     skip_upload: bool,
+    workers: int = 3,
 ) -> dict:
     """Process a single video through the full downstream pipeline."""
     raw_name = video_path.stem
@@ -1724,7 +1744,7 @@ def process_video(
     # Step 3: Transcribe
     print(f"[3/7] Transcribe............ ", end="", flush=True)
     try:
-        segments = transcribe(wav_path)
+        segments = transcribe(wav_path, workers=workers)
         total_dur = segments[-1].end if segments else 0
         mins, secs = int(total_dur) // 60, int(total_dur) % 60
         duration_str = f"{mins}:{secs:02d}"
@@ -1741,6 +1761,17 @@ def process_video(
     except Exception as e:
         fail(str(e))
         return result
+
+    # Step 3b: Verify subtitles (second-pass)
+    src_dir = Path(__file__).resolve().parent / "src"
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+    from transcribe import verify_segments
+    segments, fixes = verify_segments(segments)
+    if fixes:
+        print(f"      {Y}Verify:{X} {len(fixes)} fixes applied")
+        for fix in fixes:
+            print(f"        {D}{fix}{X}")
 
     # Step 4: Generate SRT (with smart chunking)
     srt_path = date_dir / f"{topic}.srt"
@@ -1771,37 +1802,86 @@ def process_video(
     if skip_upload:
         info("(skipped)")
     else:
+        # Async upload: launch all platforms concurrently (先登先传)
+        # Each upload function handles its own login inline
+        import threading
+
+        upload_results = {}
+        upload_lock = threading.Lock()
+
+        def _upload_platform(plat_name, upload_func, args_tuple):
+            """Run platform upload in a thread; store result."""
+            try:
+                ret = upload_func(*args_tuple)
+            except Exception as e:
+                ret = {"ok": False, "error": str(e)}
+            with upload_lock:
+                upload_results[plat_name] = ret
+
+        upload_threads = []
         for plat in platforms:
             if plat == "bilibili":
-                ret = upload_bilibili(output_mp4, title, desc, tags, cover_path)
-                if ret["ok"]:
-                    print(f"      Bilibili  {G}ok{X}  {ret['bvid']}")
-                    result["uploads"]["bilibili"] = f"ok:{ret['bvid']}"
-                else:
-                    print(f"      Bilibili  {R}FAIL{X}  {ret['error']}")
-                    result["uploads"]["bilibili"] = f"FAIL:{ret['error']}"
+                t = threading.Thread(
+                    target=_upload_platform,
+                    args=("bilibili", upload_bilibili,
+                          (output_mp4, title, desc, tags, cover_path)),
+                    daemon=True,
+                )
+                upload_threads.append(("bilibili", t))
+                t.start()
             elif plat == "weixin_channels":
-                # Run in subprocess to avoid asyncio event loop conflicts
-                # (Playwright sync_api uses asyncio internally, conflicts with
-                # the event loop left by faster-whisper/other imports)
-                ret = _run_weixin_channels_subprocess(output_mp4, title, desc, tags, cover_path)
-                if ret["ok"]:
-                    print(f"      WeChat视频号  {G}ok{X}")
-                    result["uploads"]["weixin_channels"] = "ok"
-                else:
-                    print(f"      WeChat视频号  {R}FAIL{X}  {ret['error']}")
-                    result["uploads"]["weixin_channels"] = f"FAIL:{ret['error']}"
+                t = threading.Thread(
+                    target=_upload_platform,
+                    args=("weixin_channels", _run_weixin_channels_subprocess,
+                          (output_mp4, title, desc, tags, cover_path)),
+                    daemon=True,
+                )
+                upload_threads.append(("weixin_channels", t))
+                t.start()
             elif plat == "weixin_article":
-                ret = upload_weixin_article(output_mp4, title, desc, tags, cover_path, srt_path, result.get("uploads", {}).get("bilibili", ""))
-                if ret["ok"]:
-                    print(f"      WeChat公众号  {G}ok{X}  {ret['publish_id']}")
-                    result["uploads"]["weixin_article"] = f"ok:{ret['publish_id']}"
-                else:
-                    print(f"      WeChat公众号  {R}FAIL{X}  {ret['error']}")
-                    result["uploads"]["weixin_article"] = f"FAIL:{ret['error']}"
+                # weixin_article depends on bilibili result for BV link — defer
+                upload_threads.append(("weixin_article", None))
             else:
                 print(f"      {plat.capitalize()}  {Y}-{X}  (not implemented)")
                 result["uploads"][plat] = "-"
+
+        # Wait for all async uploads (except deferred)
+        for plat_name, t in upload_threads:
+            if t is not None:
+                t.join(timeout=1200)  # 20 min max per platform
+
+        # Handle deferred weixin_article (needs bilibili BV link)
+        if "weixin_article" in platforms:
+            bili_result = upload_results.get("bilibili", {})
+            bili_info = f"ok:{bili_result.get('bvid','')}" if bili_result.get("ok") else ""
+            ret = upload_weixin_article(output_mp4, title, desc, tags, cover_path, srt_path, bili_info)
+            upload_results["weixin_article"] = ret
+
+        # Report results
+        for plat in platforms:
+            if plat in upload_results:
+                ret = upload_results[plat]
+                if plat == "bilibili":
+                    if ret.get("ok"):
+                        print(f"      Bilibili  {G}ok{X}  {ret.get('bvid','')}")
+                        result["uploads"]["bilibili"] = f"ok:{ret.get('bvid','')}"
+                    else:
+                        print(f"      Bilibili  {R}FAIL{X}  {ret.get('error','')}")
+                        result["uploads"]["bilibili"] = f"FAIL:{ret.get('error','')}"
+                elif plat == "weixin_channels":
+                    if ret.get("ok"):
+                        print(f"      WeChat视频号  {G}ok{X}")
+                        result["uploads"]["weixin_channels"] = "ok"
+                    else:
+                        print(f"      WeChat视频号  {R}FAIL{X}  {ret.get('error','')}")
+                        result["uploads"]["weixin_channels"] = f"FAIL:{ret.get('error','')}"
+                elif plat == "weixin_article":
+                    if ret.get("ok"):
+                        print(f"      WeChat公众号  {G}ok{X}  {ret.get('publish_id','')}")
+                        result["uploads"]["weixin_article"] = f"ok:{ret.get('publish_id','')}"
+                    else:
+                        print(f"      WeChat公众号  {R}FAIL{X}  {ret.get('error','')}")
+                        result["uploads"]["weixin_article"] = f"FAIL:{ret.get('error','')}"
 
     # Step 7: Cleanup
     print(f"[7/7] Cleanup............... ", end="", flush=True)
@@ -1921,7 +2001,7 @@ def ensure_all_logins(platforms: list[str]) -> dict:
 
     # Wait for all background threads
     for t in threads:
-        t.join(timeout=360)
+        t.join(timeout=720)
 
     # ── Phase 3: Summary ──
     print(f"\n  {B}[登录结果]{X}")
@@ -1945,6 +2025,155 @@ def ensure_all_logins(platforms: list[str]) -> dict:
     return results
 
 
+def _retry_failed_uploads(output_base: Path, platforms: list[str]):
+    """Retry uploading subtitled videos that previously failed upload.
+    
+    Scans run_history.json for entries with FAIL uploads, finds the corresponding
+    subtitled video in output_subtitled/, and re-uploads to the failed platforms.
+    """
+    import threading
+
+    print(f"\n{B}═══════════════════════════════════════════════════════════{X}")
+    print(f"{B}  PaperTalker-CLI · 重新上传未发布视频{X}")
+    print(f"{'═'*59}\n")
+
+    history = load_run_history()
+    if not history:
+        print(f"  {Y}没有运行历史记录{X}")
+        return
+
+    # Find entries with failed uploads
+    pending = []
+    for rec in history:
+        uploads = rec.get("uploads", {})
+        failed_plats = []
+        for plat, status in uploads.items():
+            if isinstance(status, str) and status.startswith("FAIL"):
+                if plat in platforms:
+                    failed_plats.append(plat)
+        if failed_plats:
+            pending.append((rec, failed_plats))
+
+    if not pending:
+        print(f"  {G}✓ 没有需要重新上传的视频{X}")
+        return
+
+    print(f"  发现 {len(pending)} 个未发布视频:\n")
+    for rec, failed_plats in pending:
+        topic = rec.get("topic", "?")
+        date = rec.get("date", "?")[:10]
+        plats_str = ", ".join(failed_plats)
+        print(f"    {C}{topic}{X} ({date}) → 待上传: {plats_str}")
+
+    print()
+
+    # Pre-authenticate
+    all_failed_plats = list(set(p for _, fps in pending for p in fps))
+    login_results = ensure_all_logins(all_failed_plats)
+    active_plats = [p for p in all_failed_plats if login_results.get(p) is not False]
+    if not active_plats:
+        print(f"  {R}所有平台登录失败，无法上传。{X}")
+        print(f"  {Y}请先完成平台登录，然后重新运行: python publish.py --retry{X}")
+        return
+
+    # Process each pending video
+    success_count = 0
+    for rec, failed_plats in pending:
+        topic = rec.get("topic", "unknown")
+        date_str = rec.get("date", "")[:10]
+        retry_plats = [p for p in failed_plats if p in active_plats]
+        if not retry_plats:
+            continue
+
+        # Find the subtitled video
+        date_dir = output_base / date_str
+        video_path = date_dir / f"{topic}.mp4"
+        srt_path = date_dir / f"{topic}.srt"
+        cover_path = date_dir / f"{topic}_cover.jpg"
+
+        if not video_path.exists():
+            # Try fuzzy match
+            candidates = list(date_dir.glob("*.mp4")) if date_dir.exists() else []
+            matched = [c for c in candidates if topic[:10] in c.stem]
+            if matched:
+                video_path = matched[0]
+                srt_path = video_path.with_suffix(".srt")
+            else:
+                print(f"\n  {Y}⚠ 找不到视频: {video_path}{X}")
+                continue
+
+        print(f"\n{'─'*59}")
+        print(f"  重新上传: {C}{topic}{X} → {', '.join(retry_plats)}")
+
+        title = rec.get("title", make_title(topic))
+        tags = rec.get("tags", f"{topic},AI科研,学术科普,论文解读,前沿研究,深度解读")
+        desc = f"【AI科研科普】{topic}：前沿研究深度解读"
+        cover = cover_path if cover_path.exists() else None
+
+        upload_results = {}
+
+        def _upload_platform_retry(plat_name, upload_fn, upload_args):
+            try:
+                ret = upload_fn(*upload_args)
+                upload_results[plat_name] = ret
+            except Exception as e:
+                upload_results[plat_name] = {"ok": False, "error": str(e)}
+
+        upload_threads = []
+        for plat in retry_plats:
+            if plat == "bilibili":
+                t = threading.Thread(
+                    target=_upload_platform_retry,
+                    args=("bilibili", _run_bilibili_upload,
+                          (video_path, title, desc, tags, cover)),
+                    daemon=True,
+                )
+                upload_threads.append(t)
+                t.start()
+            elif plat == "weixin_channels":
+                t = threading.Thread(
+                    target=_upload_platform_retry,
+                    args=("weixin_channels", _run_weixin_channels_subprocess,
+                          (video_path, title, desc, tags, cover)),
+                    daemon=True,
+                )
+                upload_threads.append(t)
+                t.start()
+
+        for t in upload_threads:
+            t.join(timeout=1200)
+
+        # Report and update history
+        all_ok = True
+        for plat in retry_plats:
+            ret = upload_results.get(plat, {})
+            if plat == "bilibili":
+                if ret.get("ok"):
+                    print(f"    Bilibili  {G}ok{X}  {ret.get('bvid','')}")
+                    rec["uploads"]["bilibili"] = f"ok:{ret.get('bvid','')}"
+                else:
+                    print(f"    Bilibili  {R}FAIL{X}  {ret.get('error','')}")
+                    all_ok = False
+            elif plat == "weixin_channels":
+                if ret.get("ok"):
+                    print(f"    WeChat视频号  {G}ok{X}")
+                    rec["uploads"]["weixin_channels"] = "ok"
+                else:
+                    print(f"    WeChat视频号  {R}FAIL{X}  {ret.get('error','')}")
+                    all_ok = False
+
+        if all_ok:
+            success_count += 1
+
+    # Save updated history
+    RUN_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    RUN_HISTORY_FILE.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print(f"\n{'═'*59}")
+    print(f"  重新上传完成: {success_count}/{len(pending)} 成功")
+    print(f"{'═'*59}\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Video post-production: subtitle + upload")
     parser.add_argument("--input", default=str(DEFAULT_INPUT), help="Input video directory")
@@ -1952,10 +2181,18 @@ def main():
     parser.add_argument("--platforms", nargs="+", default=["bilibili", "weixin_channels"],
                         choices=PLATFORMS, help="Upload platforms")
     parser.add_argument("--skip-upload", action="store_true", help="Skip upload step")
+    parser.add_argument("--workers", type=int, default=3, help="Parallel transcription workers (default: 3, 1=no split)")
+    parser.add_argument("--retry", action="store_true",
+                        help="Retry uploading previously subtitled but unpublished videos from output_subtitled/")
     args = parser.parse_args()
 
     input_dir = Path(args.input).resolve()
     output_base = Path(args.output).resolve()
+
+    # ── Retry mode: re-upload subtitled videos that failed upload ──
+    if args.retry:
+        _retry_failed_uploads(output_base, args.platforms)
+        return
 
     # Pre-flight dependency check
     if not preflight_check():
@@ -2005,7 +2242,7 @@ def main():
     results = []
     for i, video in enumerate(videos, 1):
         r = process_video(video, date_dir, i, len(videos), ffmpeg,
-                          args.platforms, args.skip_upload)
+                          args.platforms, args.skip_upload, args.workers)
         results.append(r)
 
     # Summary report

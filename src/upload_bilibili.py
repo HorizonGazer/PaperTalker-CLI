@@ -27,7 +27,19 @@ if sys.platform == "win32":
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 COOKIE_FILE = PROJECT_ROOT / "cookies" / "bilibili" / "account.json"
-BILIUP_EXE = PROJECT_ROOT / "vendor" / "biliup.exe"
+
+def _get_biliup_exe() -> Path:
+    """Get platform-specific biliup binary path."""
+    import platform
+    vendor = PROJECT_ROOT / "vendor"
+    if sys.platform == "win32":
+        return vendor / "biliup.exe"
+    elif platform.system() == "Darwin":
+        return vendor / "biliup-macos"
+    else:
+        return vendor / "biliup"
+
+BILIUP_EXE = _get_biliup_exe()
 
 G = "\033[92m"; Y = "\033[93m"; R = "\033[91m"; C = "\033[96m"; D = "\033[2m"; X = "\033[0m"
 
@@ -43,7 +55,7 @@ def ensure_bilibili_login() -> bool:
         return True
 
     if not BILIUP_EXE.exists():
-        print(f"{R}ERROR:{X} biliup.exe not found at {BILIUP_EXE}")
+        print(f"{R}ERROR:{X} biliup not found at {BILIUP_EXE}")
         print(f"Download from: https://github.com/biliup/biliup-rs/releases")
         return False
 
@@ -96,29 +108,36 @@ def upload_bilibili(video_path: Path, title: str, tags: str, desc: str, cover_pa
 
     # Prepare metadata
     tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-    meta = Data()
-    meta.title = title
-    meta.desc = desc
-    meta.tag = tag_list
-    meta.copyright = 1  # Original content
-
-    # Convert Path to str for biliup compatibility
-    video_str = str(video_path)
-    cover_str = str(cover_path) if cover_path else None
+    data = Data()
+    data.copyright = 1
+    data.title = title[:80]
+    data.desc = desc[:250]
+    data.tid = 201  # 科学科普
+    data.tag = ','.join(tag_list)
 
     try:
         print(f"使用cookies上传")
-        bili = BiliBili(cookie_data)
-        ret = bili.upload_file(video_str, lines="AUTO", tasks=3)
+        with BiliBili(data) as bili:
+            bili.login_by_cookies(cookie_data)
+            bili.access_token = cookie_data.get("token_info", {}).get("access_token", "")
 
-        if ret:
-            video_id = bili.submit(cover=cover_str)
-            if video_id:
-                return {"ok": True, "bvid": video_id}
+            # Upload cover image first to get URL
+            if cover_path and Path(str(cover_path)).exists():
+                try:
+                    cover_url = bili.cover_up(str(cover_path))
+                    data.cover = cover_url
+                except Exception as e:
+                    print(f"  Cover upload failed ({e}), using auto-generated cover")
+
+            video_part = bili.upload_file(str(video_path), lines="AUTO", tasks=3)
+            video_part["title"] = title[:80]
+            data.append(video_part)
+            ret = bili.submit()
+            bvid = ret.get("data", {}).get("bvid", "")
+            if bvid:
+                return {"ok": True, "bvid": bvid}
             else:
-                return {"ok": False, "error": "Submit failed (no video ID returned)"}
-        else:
-            return {"ok": False, "error": "Upload failed"}
+                return {"ok": False, "error": f"Submit returned: {ret}"}
 
     except Exception as e:
         return {"ok": False, "error": str(e)}

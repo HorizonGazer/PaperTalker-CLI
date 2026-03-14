@@ -29,14 +29,14 @@ def auto_login():
             args=["--disable-blink-features=AutomationControlled"],
         )
         page = browser.pages[0] if browser.pages else browser.new_page()
-        page.goto("https://notebooklm.google.com/", wait_until="domcontentloaded", timeout=60000)
+        page.goto("https://notebooklm.google.com/", wait_until="domcontentloaded", timeout=120000)
 
         print("[2] Waiting for NotebookLM homepage to load...")
         print("    Please complete Google login if prompted.")
         print("    Script will auto-detect when you reach the NotebookLM page.\n")
 
         # Poll until we're on the NotebookLM page (not a login redirect)
-        max_wait = 300  # 5 minutes
+        max_wait = 600  # 10 minutes
         start = time.time()
         while time.time() - start < max_wait:
             url = page.url
@@ -44,7 +44,7 @@ def auto_login():
                 # Check if the page has loaded (look for common elements)
                 try:
                     # Wait a bit for page to stabilize
-                    page.wait_for_load_state("networkidle", timeout=10000)
+                    page.wait_for_load_state("networkidle", timeout=20000)
                 except:
                     pass
                 # Verify we're really on NotebookLM
@@ -55,7 +55,7 @@ def auto_login():
             print(f"    Waiting... ({elapsed}s) Current URL: {url[:80]}", end="\r")
             time.sleep(2)
         else:
-            print("\nERROR: Timed out waiting for NotebookLM login (5 min)")
+            print("\nERROR: Timed out waiting for NotebookLM login (10 min)")
             browser.close()
             sys.exit(1)
 

@@ -32,9 +32,13 @@ End-to-end academic video production: **Research Topic** -> **NotebookLM Video**
    - Can retry `--resume` multiple times if network keeps dropping — the task ID stays valid for 30 min
 8. **Run Phase 1 then Phase 2 sequentially** without asking. After `quick_video.py` produces a video, immediately run `publish.py` to subtitle and upload.
 9. **Only confirm for truly destructive actions**: deleting user files, modifying account credentials, or force-pushing git. Everything else: just do it.
-10. **Bilibili login is fully automated.** `publish.py` handles login via Python API — displays a QR code directly in the terminal for the user to scan with Bilibili App. No interactive terminal menu, no external window. If API fails, falls back to biliup.exe in a new terminal.
-11. **Subtitle deduplication is automatic.** After transcription, `publish.py` removes consecutive duplicate/near-duplicate Whisper segments before generating SRT. No manual intervention needed.
-12. **WeChat 视频号 upload runs in an isolated subprocess** (`src/workers/weixin_upload_worker.py`) using async Playwright to avoid event loop conflicts. Login is handled via persistent browser profile; QR scan only needed on first use.
+10. **Bilibili login is fully automated.** `publish.py` handles login via Python API — displays a QR code directly in the terminal for the user to scan with Bilibili App. No interactive terminal menu, no external window. If API fails, falls back to biliup CLI in a new terminal (Windows: biliup.exe, macOS: biliup-macos).
+11. **Subtitle deduplication + verification is automatic.** After transcription, `publish.py` removes duplicates, converts Traditional→Simplified Chinese, removes garbled text, fixes timing issues. No manual intervention needed.
+12. **WeChat 视频号 upload runs in an isolated subprocess** (`src/workers/weixin_upload_worker.py`) using async Playwright to avoid event loop conflicts. Login is handled via persistent browser profile; QR scan only needed on first use. Scan-then-hang recovery: automatic page reload if QR disappears but page stays on login URL.
+13. **Platform uploads run concurrently** (先登先传). Each platform's login + upload runs in its own thread. The first platform to complete login immediately starts uploading while others are still logging in.
+14. **Login polling is fast** (0.2s intervals). All QR scan polling loops use 0.2s intervals for near-instant detection when user scans. 3-level URL re-verification uses 0.3s+0.5s (total 0.8s) to confirm login while avoiding false positives.
+14. **One-command full pipeline:** `quick_video.py "topic" --publish` generates video AND auto-publishes. Supports `--publish bilibili weixin_channels` for specific platforms.
+15. **Cross-platform:** Windows (biliup.exe), macOS (biliup-macos), Linux (biliup) binaries in `vendor/`.
 
 ## Claude Execution Workflow (MANDATORY)
 
@@ -45,7 +49,7 @@ End-to-end academic video production: **Research Topic** -> **NotebookLM Video**
 ```bash
 cd "<PROJECT_ROOT>" && PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 "$(conda info --base)/envs/papertalker/python.exe" -u quick_video.py "TOPIC" --check
 ```
-- **timeout: 120000** (2 minutes max)
+- **timeout: 240000** (4 minutes max)
 - If exit code != 0: STOP. Show the error output to the user. Do NOT proceed.
 - If exit code == 0: proceed to Step 1.
 - If auto-login is triggered (browser popup), wait for user to complete Google login.
@@ -55,7 +59,7 @@ cd "<PROJECT_ROOT>" && PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 "$(conda info -
 ```bash
 cd "<PROJECT_ROOT>" && PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 "$(conda info --base)/envs/papertalker/python.exe" -u quick_video.py "TOPIC" --no-confirm
 ```
-- **timeout: 600000**. For longer waits, use `run_in_background=true` and check with `TaskOutput`.
+- **timeout: 1200000**. For longer waits, use `run_in_background=true` and check with `TaskOutput`.
 - **CRITICAL: Record NID and TID from output.** The script prints notebook ID (after "笔记本:") and video task ID (after "视频任务:") early in the run. Save these — you need them for `--resume` if the script fails.
 - If exit code is non-zero due to **network errors**: proceed to Step 1b (Resume). Do NOT rerun this command.
 - If exit code is non-zero for **other reasons** (auth, dependency): show output and stop.
@@ -77,7 +81,7 @@ cd "<PROJECT_ROOT>" && PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 "$(conda info -
 ```bash
 cd "<PROJECT_ROOT>" && PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 "$(conda info --base)/envs/papertalker/python.exe" -u publish.py
 ```
-- **timeout: 600000**
+- **timeout: 1200000**
 - Check exit code. Report results (BV number, etc.) to user.
 
 ## Pipeline Overview
@@ -127,11 +131,13 @@ PaperTalker-CLI/
 ├── quick_video.py             # Phase 1: topic -> NotebookLM video (async)
 ├── publish.py                 # Phase 2: subtitle + upload (canonical copy)
 ├── src/workers/weixin_upload_worker.py   # WeChat Channels upload subprocess (async Playwright)
-├── src/utils/paper_search.py            # Multi-platform paper search wrapper
+├── src/utils/paper_search.py            # Literature search wrapper (uses skills/literature-review)
 ├── video.md                   # Video generation prompt (strict academic rigor)
 ├── schedule.txt               # Daily schedule: tab-separated format with completion tracking
-├── run_scheduled.py           # Cron entry point: pick topic -> Phase 1 -> Phase 2
-├── setup_cron.py              # OpenClaw cron registration helper
+├── run_scheduled.py           # Cron entry point: pick topic -> Phase 1 -> Phase 2 (supports --pre-hook/--post-hook)
+├── auto_tracker.py            # Auto paper discovery: literature search -> schedule.txt
+├── setup_cron.py              # OpenClaw cron registration helper (10 AM default)
+├── OPENCLAW.md                # OpenClaw handoff document (architecture + usage + TODO)
 ├── run_history.json           # Completed schedule run records
 ├── run_history.txt            # Simple text log of completed schedule runs
 ├── .env / .env.example        # Proxy + API keys (HTTPS_PROXY, NCBI_API_KEY, SS_API_KEY, WECHAT_*)
@@ -148,15 +154,17 @@ PaperTalker-CLI/
 │   ├── bilibili/account.json  #   Bilibili auth
 │   └── weixin/storage_state.json  # WeChat 视频号 Playwright auth
 ├── vendor/                    # Binary tools (gitignored)
-│   └── biliup.exe             #   Bilibili login/upload tool
+│   ├── biliup.exe             #   Bilibili login/upload (Windows)
+│   └── biliup-macos           #   Bilibili login/upload (macOS)
 ├── output/                    # Raw videos (cleared after downstream)
 ├── output_subtitled/          # Subtitled videos organized by date
 │   └── YYYY-MM-DD/           #   {topic}.mp4, {topic}.srt
 ├── deps/
 │   ├── notebooklm-py/        # NotebookLM Python client (v0.3.2, local editable)
 │   │   └── src/notebooklm/   #   Client API: notebooks, sources, artifacts, research, chat
-│   └── paper-search-mcp/     # Academic paper search (v0.1.3, MCP server)
-│       └── paper_search_mcp/ #   8 platforms: arxiv, pubmed, biorxiv, medrxiv, etc.
+│   └── paper-search-mcp/     # (legacy, replaced by literature-review skill)
+├── skills/literature-review/ # Academic paper search skill
+│   └── scripts/paper_search.py  # SemanticScholarSearcher, ArxivSearcher, CrossRefSearcher
 └── skills/paper-talker/       # Skill definition (distributable)
     ├── SKILL.md
     ├── scripts/publish.py    # Phase 2 copy (for skill distribution)
@@ -167,7 +175,7 @@ PaperTalker-CLI/
 
 | Component | **Used (Tested)** | Alternative (Not in Pipeline) |
 |-----------|-------------------|-------------------------------|
-| Transcription | `faster-whisper` GPU preferred (large-v3 float16), CPU fallback (small int8), isolated subprocess | Doubao ASR (permission issues) |
+| Transcription | `faster-whisper` GPU preferred (large-v3 float16), CPU fallback (small int8), isolated subprocess, **parallel chunked transcription** (default 3 workers) | Doubao ASR (permission issues) |
 | Subtitle burn | FFmpeg `subtitles` filter | VectCutAPI (needs manual JianYing export) |
 | Upload | `biliup` library direct import (`vendor/biliup.exe` for login) | — |
 | FFmpeg binary | `imageio-ffmpeg` pip package | `conda install ffmpeg` (GBK crash) |
@@ -276,9 +284,9 @@ When cookies are missing, `publish.py` calls Bilibili's TV QR login API directly
 2. Renders the QR code in the terminal via `qrcode` library (ASCII art)
 3. User scans with Bilibili App — no menu selection needed
 4. Polls every 0.5s for login completion; shows **intermediate status** (`✓ 已扫码! 请在手机上点击「确认登录」`) when QR is scanned but not yet confirmed (API codes 86039/86090)
-5. Saves cookies to `cookies/bilibili/account.json` immediately on success (120s timeout)
+5. Saves cookies to `cookies/bilibili/account.json` immediately on success (240s timeout)
 
-If the Python API fails, falls back to launching `biliup.exe login` in a new terminal window.
+If the Python API fails, falls back to launching `biliup` CLI in a new terminal window (cross-platform: Windows/macOS/Linux).
 
 Manual fallback if auto-login fails:
 ```bash
@@ -300,6 +308,15 @@ PYTHONUNBUFFERED=1 python -u quick_video.py "虚拟细胞" --check
 
 # Step 1: Generate video (only if Step 0 exits 0)
 PYTHONUNBUFFERED=1 python -u quick_video.py "虚拟细胞" --no-confirm
+
+# One-command: generate + auto-publish (combines Phase 1 + Phase 2)
+PYTHONUNBUFFERED=1 python -u quick_video.py "虚拟细胞" --no-confirm --publish bilibili weixin_channels
+
+# From local PDF, generate + auto-publish
+PYTHONUNBUFFERED=1 python -u quick_video.py "主题" --source file --files paper.pdf --no-confirm --publish
+
+# From keyword search, generate + auto-publish
+PYTHONUNBUFFERED=1 python -u quick_video.py "蛋白质折叠" --source search --no-confirm --publish
 ```
 
 ### Upstream Pipeline
@@ -320,9 +337,9 @@ Step 7: Download MP4 to output/{topic}_{timestamp}.mp4
 | Mode | Behavior | Command Example |
 |------|----------|-----------------|
 | `research` (default) | NotebookLM Deep Research auto-searches web | `python quick_video.py "生物智能体"` |
-| `search` | paper-search-mcp across 8 academic databases | `python quick_video.py "蛋白质折叠" --source search --platforms arxiv pubmed --year 2024` |
+| `search` | literature-review skill (Semantic Scholar + arXiv + CrossRef); auto-translates Chinese queries | `python quick_video.py "蛋白质折叠" --source search --platforms arxiv semantic_scholar --year 2024` |
 | `upload` | Opens notebook URL for manual file upload | `python quick_video.py "量子计算" --source upload` |
-| `mixed` | Deep Research + paper search combined | `python quick_video.py "LLM药物发现" --source mixed --platforms semantic_scholar` |
+| `mixed` | Deep Research + literature-review search combined | `python quick_video.py "LLM药物发现" --source mixed --platforms semantic_scholar` |
 | `file` | Import local files (PDF/txt/md/docx) | `python quick_video.py "Attention" --source file --files paper.pdf ./papers/` |
 | `paper` | Search by paper title, pick from candidates | `python quick_video.py "Transformer" --source paper` |
 
@@ -336,15 +353,16 @@ Step 7: Download MP4 to output/{topic}_{timestamp}.mp4
 | `--style` | `whiteboard` | 9 styles: whiteboard, classic, anime, kawaii, watercolor, retro_print, heritage, paper_craft, auto |
 | `--lang` | `zh-CN` | Language code |
 | `--mode` | `deep` | Deep Research depth: fast/deep |
-| `--platforms` | arxiv semantic_scholar | Paper search: arxiv, pubmed, biorxiv, medrxiv, semantic_scholar, google_scholar, crossref, iacr |
+| `--platforms` | arxiv semantic_scholar | Paper search: arxiv, semantic_scholar, crossref |
 | `--max-results` | `10` | Per-platform result limit |
 | `--year` | none | Paper year filter |
 | `--output` | `./output` | Video output directory |
-| `--timeout` | `1800` | Generation timeout (seconds) |
+| `--timeout` | `3600` | Generation timeout (seconds) |
 | `--instructions` | video.md | Custom video prompt (override video.md) |
 | `--no-confirm` | false | Skip stage confirmations |
 | `--resume NID TID` | — | Resume timed-out video task |
 | `--files` | — | File/directory paths for `--source file` mode (PDF/txt/md/docx) |
+| `--publish` | — | Auto-publish after generation (e.g. `--publish bilibili weixin_channels`) |
 
 For full parameter reference, see [references/upstream.md](references/upstream.md).
 
@@ -381,6 +399,7 @@ Script options:
 --platforms bilibili weixin_channels weixin_article # Choose platforms
 --input output/            # Custom input dir
 --output output_subtitled/ # Custom output dir
+--workers 3                # Parallel transcription workers (default: 3, 1=no split)
 ```
 
 **Supported platforms:**
@@ -397,7 +416,8 @@ Script options:
 |------|--------|---------|
 | 1 | Extract Audio | FFmpeg -> 16kHz mono WAV |
 | 2 | Extract Cover | First frame of **original** (un-subtitled) video as JPEG; dual FFmpeg approach for robustness |
-| 3 | Transcribe | faster-whisper in isolated subprocess; GPU (large-v3 float16) preferred, CPU (small int8) fallback; MKL env vars auto-set; **auto-deduplicates** consecutive identical/near-identical segments |
+| 3 | Transcribe | faster-whisper in isolated subprocess(es); GPU (large-v3 float16) preferred, CPU (small int8) fallback; **parallel chunked** (default 3 workers, `--workers N`): splits audio into overlapping chunks, transcribes in parallel, merges with timestamp alignment; MKL env vars auto-set; **auto-deduplicates** consecutive identical/near-identical segments |
+| 3b | Verify | Second-pass subtitle verification: Traditional→Simplified Chinese conversion, garbled text removal, duplicate dedup, timing fixes, short-segment cleanup |
 | 4 | Generate SRT | Smart chunking: jieba word-aware split, max 18 chars/line, word-level time alignment |
 | 5 | Burn Subtitles | FFmpeg subtitles filter (Microsoft YaHei, white + black outline, MarginV=30) |
 | 6 | Upload | Auto-generated title/desc/tags, cover image, per platform |
@@ -407,15 +427,17 @@ Script options:
 
 For fine-grained control, use standalone scripts in `src/`:
 
-| Script | Purpose | Example |
-|--------|---------|---------|
+| Script | Description | Example |
+|--------|-------------|---------|
 | `src/transcribe.py` | Audio extraction + Whisper transcription + SRT generation | `python src/transcribe.py video.mp4` |
+| `src/transcribe.py` | Parallel transcription (3 workers default) | `python src/transcribe.py video.mp4 --workers 3` |
 | `src/subtitle.py` | Burn SRT subtitles into video | `python src/subtitle.py video.mp4 subtitles.srt` |
 | `src/upload_bilibili.py` | Upload to Bilibili with metadata | `python src/upload_bilibili.py video.mp4 --title "标题" --tags "tag1,tag2" --cover cover.jpg` |
 | `src/upload_weixin.py` | Upload to WeChat Channels | `python src/upload_weixin.py video.mp4 --title "标题" --desc "描述"` |
 
 **Use cases:**
 - Re-transcribe with different model: `python src/transcribe.py video.mp4 --model large-v3 --device cuda`
+- Parallel transcribe (faster on CPU): `python src/transcribe.py video.mp4 --workers 3`
 - Re-upload with different metadata: `python src/upload_bilibili.py video.mp4 --title "新标题" --tags "新标签"`
 - Subtitle-only workflow: `python src/transcribe.py video.mp4 && python src/subtitle.py video.mp4 video.srt`
 - Upload-only workflow: `python src/upload_bilibili.py video.mp4 --title "标题" --tags "tag1,tag2" --auto-login`
@@ -438,7 +460,9 @@ The script auto-generates B站-optimized metadata from the filename:
 ### Subtitle Smart Chunking
 
 Long whisper segments are split for screen readability:
-1. **Deduplication** (new): consecutive identical or near-identical segments are merged (Whisper/VAD artifact); removed count is logged
+1. **Parallel transcription** (new): audio split into N overlapping chunks (3s overlap), each transcribed in separate subprocess, merged with timestamp alignment and overlap deduplication
+2. **Verification** (new): second-pass checks — Traditional→Simplified Chinese, garbled text removal, duplicate dedup, timing fixes, short-segment cleanup
+3. **Deduplication**: consecutive identical or near-identical segments are merged (Whisper/VAD artifact); removed count is logged
 2. **Punctuation split** (highest priority): ，。、；！？：,.;!?:
 3. **Word-boundary split** (via `jieba`): never breaks mid-word (e.g. "活生生" stays intact)
 4. Max 18 Chinese characters per subtitle line
@@ -519,10 +543,15 @@ Tab-separated format with completion tracking:
 # Columns: date	topic	source_mode	platforms	max_results	status	completed_at	notes
 # Legal values:
 #   date: YYYY-MM-DD or "queue"
-#   source_mode: research, search, file, paper
+#   source_mode: research, search, file, paper, upload, mixed
 #   platforms: bilibili, douyin, weixin_channels, weixin_article, xiaohongshu, kuaishou (comma-separated)
 #   max_results: 1-50
 #   status: pending, completed, failed
+#
+# Source Mode Categories:
+#   1. NotebookLM 检索: research (Deep/Fast Research), mixed (Research + 文献检索)
+#   2. 自主文献检索: search (Semantic Scholar + arXiv + CrossRef), paper (按标题搜索选择)
+#   3. 本地文件: file (导入 PDF/txt/md/docx), upload (手动上传)
 
 2026-03-10	蛋白质折叠	search	bilibili,weixin_channels	5	pending
 queue	单细胞测序	research	bilibili,weixin_channels	5	pending
@@ -543,18 +572,54 @@ python run_scheduled.py                  # Run today's topic
 python run_scheduled.py --dry-run        # Preview without executing
 python run_scheduled.py --force "topic"  # Override topic
 python run_scheduled.py --skip-phase2    # Video generation only
+python run_scheduled.py --json           # Machine-readable JSON output (for OpenClaw)
+python run_scheduled.py --publish-platforms bilibili weixin_channels  # Override publish platforms
+python run_scheduled.py --source-args '{"year": 2025}'  # Extra args for source mode
+python run_scheduled.py --pre-hook "auto_tracker.py --write-schedule"  # Run paper discovery before topic selection
+python run_scheduled.py --post-hook "notify.py"  # Run script after pipeline completion
 ```
 
-Flow: pick_topic() → Phase 1 (quick_video, in-process async) → Phase 2 (publish.py, subprocess) → mark_completed()
+Exit codes: 0 = success, 1 = failure (for cron/OpenClaw integration).
+
+Flow: pre-hook → pick_topic() → Phase 1 (quick_video, in-process async) → Phase 2 (publish.py, subprocess) → mark_completed() → post-hook
+
+### auto_tracker.py
+
+Weekly hot topic paper tracker using literature-review skill (Semantic Scholar + arXiv).
+Runs weekly, ranks by citation count, distributes topics across next 7 days (one per day).
+
+```bash
+python auto_tracker.py                            # Report only (dry run)
+python auto_tracker.py --write-schedule           # Write topics to schedule.txt (weekly, with dates)
+python auto_tracker.py --write-schedule --force   # Force run even if ran this week
+python auto_tracker.py --status                   # Show schedule status only
+python auto_tracker.py --days 180 --top 5         # Custom lookback & top N
+python auto_tracker.py --json                     # Machine-readable output
+python auto_tracker.py --domains 0,2              # Search specific domains only
+```
+
+Key behavior:
+- 6-day cooldown between runs (use `--force` to override)
+- Source mode: `research` (NotebookLM web search, the default)
+- Skips dates that already have user-specified pending entries
+- Records run history to `tracker_history.txt`
+
+Tracked domains (cross-AI):
+- 0: 肿瘤+AI (tumor cancer)
+- 1: 肠道+AI (gut microbiome)
+- 2: 单细胞+AI (single-cell RNA-seq)
+- 3: 空间转录组+AI (spatial transcriptomics)
 
 ### setup_cron.py
 
 Register OpenClaw cron job:
 
 ```bash
-python setup_cron.py                    # Show command (default 9 AM)
-python setup_cron.py --time "14:30"     # Custom time
-python setup_cron.py --execute          # Auto-register
+python setup_cron.py                              # Show command (default 10 AM, with pre-hook)
+python setup_cron.py --execute                    # Auto-register (single cron)
+python setup_cron.py --with-tracker --execute     # Dual cron (8:30 tracker + 10:00 pipeline)
+python setup_cron.py --time "14:30"               # Custom pipeline time
+python setup_cron.py --tracker-time "08:00"       # Custom tracker time
 ```
 
 ## Known Issues
@@ -569,17 +634,25 @@ See [references/known_issues.md](references/known_issues.md) for full list. Crit
 | FFmpeg subtitle Windows paths | `path.replace('\\','/').replace(':','\\:')` |
 | CUDA crash with `word_timestamps=True` in function scope | Subprocess transcribe (auto in publish.py) |
 | MKL `mkl_malloc` memory failure on CPU | Set `MKL_THREADING_LAYER=sequential`, `OMP_NUM_THREADS=1` before import; use `small` model on CPU |
-| biliup login interactive | Auto-handled: `publish.py` uses Python API for QR login (terminal QR code, no menu). Falls back to .bat if API fails |
-| Whisper duplicate segments | Auto-handled: `deduplicate_segments()` merges consecutive identical/near-identical segments after transcription |
-| WeChat 视频号 login detection | Direct navigate to `post/create` URL. If on login page, poll every 0.5s for URL change to `post/create` (WeChat auto-redirects after QR scan) |
-| WeChat 视频号 publish button | Try 3 click methods (direct, force, JS). Wait for URL redirect to `post/list` to confirm success. Keep browser open 35s after publish |
+| biliup login interactive | Auto-handled: `publish.py` uses Python API for QR login (terminal QR code, no menu). Falls back to biliup CLI if API fails. Cross-platform: biliup.exe (Win), biliup-macos (Mac) |
+| Whisper duplicate segments | Auto-handled: `verify_segments()` merges duplicates, converts T2S, removes garbled text, fixes timing |
+| WeChat 视频号 login detection | Direct navigate to `post/create` URL. If on login page, poll every 0.2s for URL change. 3-level re-verify (0.3s+0.5s) avoids false positives. Auto-reload if page stuck after QR scan |
+| WeChat 视频号 file chooser | Use `set_input_files()` instead of `expect_file_chooser()` — more stable in non-interactive environments |
+| WeChat 视频号 publish button | Try 3 click methods (direct, force, JS). Wait for URL redirect to `post/list` to confirm success. Keep browser open 70s after publish |
 | WeChat 视频号 short title < 6 chars | Auto-pad with "—视频解读" to meet 6-char minimum |
 | Playwright chromium version mismatch | `python -m playwright install chromium` (or upgrade playwright to match existing browser) |
 | Network errors during video generation | Do NOT create a new notebook. Record NID+TID from output, wait 2-3 min, then `--resume NID TID` |
 | NotebookLM auth expired | Auto-handled: `quick_video.py` calls `tools/auto_login.py` automatically |
 | Doubao ASR 45000030 permission | Use `faster-whisper` local GPU instead |
+| Chinese queries return 0 results | Auto-translated to English by `paper_search.py` (~60 academic term mappings) |
+| paper-search-mcp replaced | Use `skills/literature-review` (Semantic Scholar + arXiv + CrossRef) via `src/utils/paper_search.py` |
 | biliup < 1.0 blocked (21590) | `pip install "biliup>=1.1.29"` |
 | `login_by_cookies` KeyError | Pass full `account` dict, NOT `account['cookie_info']` |
+| BiliBili(data) initialization | Must pass `Data` object, then call `bili.login_by_cookies(account)` separately. Do NOT pass cookie_data as constructor arg |
+| B站 tag format (code 21001) | `data.tag` must be comma-separated string, NOT list. Use `data.tag = ','.join(tags)` after Data() construction (`__post_init__` only converts at init time) |
+| B站 preupload returns 412/empty | Session cookies not loaded — ensure `login_by_cookies()` is called before `upload_file()` |
+| biliup API QR request fails | JSON parse error on `auth_code` endpoint — intermittent. Falls back to biliup.exe CLI (requires interactive terminal) |
+| NotebookLM video generation fails with 20 sources | Too many sources can cause "failed" status. Use `--max-results 5` (10 total from 2 platforms) for reliability |
 
 ## Progress Display
 
@@ -595,7 +668,10 @@ Date folder: output_subtitled/2026-03-03/
   Topic: 虚拟细胞
 [1/7] Extract audio......... ok
 [2/7] Extract cover......... ok -> 虚拟细胞_cover.jpg
-[3/7] Transcribe............ ok (210 segments, 9:39)
+[3/7] Transcribe............ ok (210 segments, 9:39) [3 workers]
+      Verify: 2 fixes applied
+        T2S: '學習' -> '学习'
+        removed 1 duplicate segments
 [4/7] Generate SRT.......... ok (295 subtitles) -> 2026-03-03/虚拟细胞.srt
 [5/7] Burn subtitles........ ok -> 2026-03-03/虚拟细胞.mp4
 [6/7] Upload:

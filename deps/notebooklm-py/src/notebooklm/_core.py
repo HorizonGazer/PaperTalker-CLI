@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 MAX_CONVERSATION_CACHE_SIZE = 100
 
 # Default HTTP timeouts in seconds
-DEFAULT_TIMEOUT = 120.0  # Generous read/write timeout for slow RPC calls (research, import, poll)
-DEFAULT_CONNECT_TIMEOUT = 15.0  # Connection establishment timeout
+DEFAULT_TIMEOUT = 240.0  # Generous read/write timeout for slow RPC calls (research, import, poll)
+DEFAULT_CONNECT_TIMEOUT = 30.0  # Connection establishment timeout
 
 # Auth error detection patterns (case-insensitive)
 AUTH_ERROR_PATTERNS = (

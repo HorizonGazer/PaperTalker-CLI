@@ -11,10 +11,10 @@ PaperTalker-CLI · quick_video.py — 一键主题→视频 (独立版)
     python quick_video.py "Transformer" --source paper
 
 来源模式 (--source):
-    research   Deep Research 自动搜索网络资料（默认）
-    search     paper-search-mcp 论文检索，支持 --platforms / --year / --max-results
+    research   NotebookLM Deep/Fast Research 自动搜索网络资料（默认）
+    search     自主文献检索 (Semantic Scholar + arXiv + CrossRef)，支持 --platforms / --year / --max-results
     upload     打开 NotebookLM 笔记本页面，用户手动上传文件后继续
-    mixed      先 Deep Research，再补充论文检索
+    mixed      先 NotebookLM Research，再补充自主文献检索
     file       导入本地文件（PDF/txt/md/docx），需配合 --files 参数
     paper      按标题搜索论文，列出候选让用户选择后导入
 
@@ -30,6 +30,7 @@ PaperTalker-CLI · quick_video.py — 一键主题→视频 (独立版)
 import argparse
 import asyncio
 import os
+import subprocess
 import sys
 import time
 import webbrowser
@@ -99,7 +100,7 @@ async def preflight_check() -> bool:
                 login_script = str(CLI_DIR / "tools" / "auto_login.py")
                 login_result = subprocess.run(
                     [sys.executable, login_script],
-                    timeout=360,
+                    timeout=720,
                 )
                 if login_result.returncode != 0:
                     err("自动登录失败，请手动运行: python tools/auto_login.py")
@@ -201,19 +202,85 @@ def print_sources_table(sources: list[dict], label: str = "来源"):
 # ══════════════════════════════════════════════════════════
 
 async def source_deep_research(client, notebook_id: str, topic: str, mode: str = "deep") -> list[dict]:
-    """Deep Research: 启动 → 轮询 → 返回发现的来源。"""
+    """Deep Research: 启动 → 轮询 → 返回发现的来源。
+
+    如果 Deep Research 失败（速率限制等），提示用户切换账号或自动降级到 Fast Research。
+    """
     step(2, 7, f"启动 Deep Research ({mode})...")
     t0 = time.time()
-    task = await client.research.start(notebook_id, query=topic, source="web", mode=mode)
+
+    try:
+        task = await client.research.start(notebook_id, query=topic, source="web", mode=mode)
+    except Exception as e:
+        error_msg = str(e).lower()
+        # 检测速率限制错误
+        if "rate" in error_msg or "limit" in error_msg or "quota" in error_msg or "429" in error_msg:
+            if mode == "deep":
+                warn(f"Deep Research 被限流: {e}")
+                print()
+                print(f"  {'='*60}")
+                print(f"  {Y}检测到 Deep Research 速率限制{X}")
+                print(f"  ")
+                print(f"  可选方案:")
+                print(f"    1. 切换 Google 账号（重新登录 NotebookLM）")
+                print(f"    2. 自动降级到 Fast Research（速度更快，质量略低）")
+                print(f"    3. 使用论文搜索模式（--source search）")
+                print(f"  {'='*60}")
+                print()
+
+                # 询问用户
+                response = input(f"  是否切换账号？(y/N): ").strip().lower()
+                if response in ['y', 'yes', '是']:
+                    print(f"\n  {Y}正在重新登录 NotebookLM...{X}")
+                    # 删除旧的认证文件
+                    auth_file = Path.home() / ".notebooklm" / "storage_state.json"
+                    if auth_file.exists():
+                        auth_file.unlink()
+                        print(f"  {G}✓ 已清除旧账号缓存{X}")
+
+                    # 调用自动登录
+                    import subprocess
+                    auto_login_script = CLI_DIR / "tools" / "auto_login.py"
+                    if auto_login_script.exists():
+                        result = subprocess.run(
+                            [sys.executable, str(auto_login_script)],
+                            capture_output=False
+                        )
+                        if result.returncode == 0:
+                            print(f"  {G}✓ 账号切换成功，请重新运行脚本{X}")
+                            sys.exit(0)
+                        else:
+                            err("账号切换失败")
+                            return []
+                    else:
+                        err(f"找不到自动登录脚本: {auto_login_script}")
+                        return []
+                else:
+                    warn("自动降级到 Fast Research...")
+                    return await source_deep_research(client, notebook_id, topic, mode="fast")
+            else:
+                err(f"Fast Research 也被限流: {e}")
+                print(f"\n  {Y}建议切换 Google 账号后重试{X}")
+                print(f"  运行: python tools/auto_login.py")
+                return []
+        else:
+            err(f"Deep Research 启动失败: {e}")
+            return []
+
     if not task:
-        err("Deep Research 启动失败")
-        return []
+        if mode == "deep":
+            warn("Deep Research 启动失败，尝试降级到 Fast Research...")
+            return await source_deep_research(client, notebook_id, topic, mode="fast")
+        else:
+            err("Fast Research 启动失败")
+            return []
+
     task_id = task.get("task_id")
     ok(f"Research 已启动: task_id={task_id}")
 
-    step(3, 7, "等待 Deep Research 完成 (最长 20 分钟)...")
+    step(3, 7, "等待 Deep Research 完成 (最长 40 分钟)...")
     consecutive_errors = 0
-    for i in range(240):
+    for i in range(480):
         await asyncio.sleep(5)
         try:
             result = await client.research.poll(notebook_id)
@@ -249,8 +316,8 @@ async def source_deep_research(client, notebook_id: str, topic: str, mode: str =
 
 
 async def source_paper_search(topic: str, platforms: list[str], max_results: int, year: int | None) -> list[dict]:
-    """paper-search-mcp 论文检索。"""
-    from paper_search import search_papers
+    """自主文献检索 (literature-review skill: Semantic Scholar + arXiv + CrossRef)。"""
+    from src.utils.paper_search import search_papers
     step(2, 7, f"搜索论文: platforms={platforms}, max={max_results}, year={year or 'any'}...")
     t0 = time.time()
     papers = await search_papers(topic, platforms=platforms, max_results=max_results, year=year)
@@ -346,7 +413,7 @@ async def source_paper_title(
     platforms: list[str], max_results: int, no_confirm: bool = False,
 ) -> list[dict]:
     """按论文标题搜索，列出候选让用户选择后导入。"""
-    from paper_search import search_papers
+    from src.utils.paper_search import search_papers
     step(2, 7, f"搜索论文: '{topic}' on {platforms}...")
     t0 = time.time()
     papers = await search_papers(topic, platforms=platforms, max_results=max_results)
@@ -447,7 +514,7 @@ async def run(
     max_results: int = 10,
     year: int | None = None,
     output_dir: str = "./output",
-    timeout: float = 1800.0,
+    timeout: float = 3600.0,
     instructions: str | None = None,
     no_confirm: bool = False,
     file_paths: list[str] | None = None,
@@ -477,7 +544,7 @@ async def run(
                 login_script = str(CLI_DIR / "tools" / "auto_login.py")
                 login_result = subprocess.run(
                     [sys.executable, login_script],
-                    timeout=360,
+                    timeout=720,
                 )
                 if login_result.returncode != 0:
                     err("自动登录失败，请手动运行: python tools/auto_login.py")
@@ -561,7 +628,7 @@ async def run(
         # ── Step 5: 等待来源处理 ──────────────────────────
         step(5, total, "等待来源处理...")
         if imported_count > 0:
-            wait_s = min(30 + imported_count * 5, 180)
+            wait_s = min(30 + imported_count * 5, 360)
             for i in range(wait_s):
                 sys.stdout.write(f"\r    等待中... {i+1}/{wait_s}s")
                 sys.stdout.flush()
@@ -685,7 +752,7 @@ async def run(
 
 async def resume_video(
     notebook_id: str, task_id: str, topic: str = "resume",
-    output_dir: str = "./output", timeout: float = 1800.0,
+    output_dir: str = "./output", timeout: float = 3600.0,
 ):
     out = Path(output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -713,7 +780,7 @@ async def resume_video(
                 login_script = str(CLI_DIR / "tools" / "auto_login.py")
                 login_result = subprocess.run(
                     [sys.executable, login_script],
-                    timeout=360,
+                    timeout=720,
                 )
                 if login_result.returncode != 0:
                     err("自动登录失败，请手动运行: python tools/auto_login.py")
@@ -827,7 +894,7 @@ def main():
     p.add_argument("topic", help="视频主题")
     p.add_argument("--source", default="research",
                    choices=["research", "search", "upload", "mixed", "file", "paper"],
-                   help="来源模式 (默认: research)")
+                   help="来源模式: research=NotebookLM检索, search=自主文献检索, file=本地文件 (默认: research)")
     p.add_argument("--files", nargs="+", default=None,
                    help="本地文件或目录路径 (用于 --source file)")
     p.add_argument("--style", default="whiteboard", choices=list(STYLE_MAP.keys()),
@@ -836,14 +903,14 @@ def main():
     p.add_argument("--mode", default="deep", choices=["fast", "deep"],
                    help="Deep Research 模式 (默认: deep)")
     p.add_argument("--platforms", nargs="+", default=None,
-                   help="论文搜索平台 (默认: arxiv semantic_scholar)")
+                   help="文献检索平台 (默认: arxiv semantic_scholar; 可选: crossref)")
     p.add_argument("--max-results", type=int, default=10,
                    help="每平台最大结果数 (默认: 10)")
     p.add_argument("--year", type=int, default=None,
                    help="论文年份筛选")
     p.add_argument("--output", default="./output", help="输出目录 (默认: ./output)")
-    p.add_argument("--timeout", type=float, default=1800.0,
-                   help="视频生成超时秒数 (默认: 1800 = 30分钟)")
+    p.add_argument("--timeout", type=float, default=3600.0,
+                   help="视频生成超时秒数 (默认: 3600 = 60分钟)")
     p.add_argument("--instructions", default=None,
                    help="自定义视频指令 (覆盖 video.md)")
     p.add_argument("--no-confirm", action="store_true",
@@ -852,6 +919,9 @@ def main():
                    help="仅检查 NotebookLM 连通性，不生成视频")
     p.add_argument("--resume", nargs=2, metavar=("NOTEBOOK_ID", "TASK_ID"),
                    help="恢复超时的视频生成")
+    p.add_argument("--publish", nargs="*", default=None,
+                   metavar="PLATFORM",
+                   help="生成后自动发布 (可指定平台: bilibili weixin_channels, 默认: bilibili weixin_channels)")
 
     a = p.parse_args()
 
@@ -874,7 +944,34 @@ def main():
         timeout=a.timeout, instructions=a.instructions, no_confirm=a.no_confirm,
         file_paths=a.files,
     ))
-    sys.exit(0 if result else 1)
+
+    if not result:
+        sys.exit(1)
+
+    # Auto-publish if --publish specified
+    if a.publish is not None:
+        publish_platforms = a.publish if a.publish else ["bilibili", "weixin_channels"]
+        print(f"\n{'='*60}")
+        print(f"  Phase 2: Auto-publishing to {', '.join(publish_platforms)}")
+        print(f"{'='*60}\n")
+
+        publish_cmd = [
+            sys.executable, "-u",
+            str(Path(__file__).resolve().parent / "publish.py"),
+            "--platforms", *publish_platforms,
+        ]
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+        try:
+            ret = subprocess.run(publish_cmd, env=env, timeout=3600,
+                                 cwd=str(Path(__file__).resolve().parent))
+            if ret.returncode != 0:
+                print(f"\n  Auto-publish failed (exit code {ret.returncode})")
+                sys.exit(1)
+        except subprocess.TimeoutExpired:
+            print(f"\n  Auto-publish timed out (60 min)")
+            sys.exit(1)
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":
