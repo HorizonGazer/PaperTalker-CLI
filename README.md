@@ -58,12 +58,11 @@
 
 ### 方式 B：OpenClaw 全自动部署（推荐长期使用）
 
-如果你使用 [OpenClaw](https://docs.openclaw.ai)，可以实现**全自动每日视频生产**。只需让你的 Agent 阅读 [OPENCLAW.md](OPENCLAW.md)：
+如果你使用 [OpenClaw](https://docs.openclaw.ai)，可以实现**全自动每日视频生产**。只需让你的 Agent 阅读 [OPENCLAW.md](OPENCLAW.md)，则自动完成：环境检测 → 安装依赖 → 注册 3 个 cron → 运行测试流水线 → 汇报结果：
 
-```
-你 → "帮我克隆并安装 PaperTalker-CLI 项目：git clone https://github.com/HorizonGazer/PaperTalker-CLI.git到我指定的路径（更改路径），阅读 OPENCLAW.md，按照文档设置好定时任务并执行一次测试"
-Agent → 自动完成：环境检测 → 安装依赖 → 注册 3 个 cron → 运行测试流水线 → 汇报结果
-```
+>帮我克隆并安装 PaperTalker-CLI 项目：
+>1. git clone https://github.com/HorizonGazer/PaperTalker-CLI.git，到我指定的路径（更改路径）
+>2. 阅读 OPENCLAW.md，按照文档设置好定时任务并执行一次测试
 
 **OPENCLAW.md** 是一份 1000+ 行的完整操作手册，覆盖：
 
