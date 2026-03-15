@@ -1631,34 +1631,86 @@ def _qr_login_bat() -> bool:
             except Exception:
                 pass
 
-            # Strategy A: Direct inline execution (most reliable on macOS)
-            # biliup login shows interactive menu; auto-send "1" to select QR scan
-            print(f"  {Y}在当前终端执行B站登录 (自动选择扫码)...{X}")
-            print(f"  {D}请用B站App扫码{X}")
+            # Strategy A: Direct inline with menu auto-detection
+            # Read biliup's menu output, find the QR scan option number, then send it
+            print(f"  {Y}在当前终端执行B站登录 (自动匹配扫码选项)...{X}")
             try:
+                import pty, select
+                # Use pty so biliup thinks it has a real terminal (shows interactive menu)
+                master_fd, slave_fd = pty.openpty()
                 proc = subprocess.Popen(
                     [str(biliup_exe), "-u", str(COOKIE_FILE), "login"],
                     cwd=str(PROJECT_ROOT / "vendor"),
-                    stdin=subprocess.PIPE,
+                    stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
                 )
-                # Send "1\n" to auto-select QR scan option (usually option 1)
+                _os.close(slave_fd)
+
                 import time as _time
-                _time.sleep(1)  # Wait for menu to appear
-                try:
-                    proc.stdin.write(b"1\n")
-                    proc.stdin.flush()
-                except Exception:
-                    pass
-                proc.wait(timeout=300)
+                menu_buf = b""
+                qr_option = None
+                sent = False
+
+                # Read menu output for up to 5 seconds
+                for _ in range(50):
+                    _time.sleep(0.1)
+                    ready, _, _ = select.select([master_fd], [], [], 0.1)
+                    if ready:
+                        try:
+                            chunk = _os.read(master_fd, 4096)
+                            menu_buf += chunk
+                            sys.stdout.buffer.write(chunk)
+                            sys.stdout.flush()
+                        except OSError:
+                            break
+
+                    if not sent:
+                        menu_text = menu_buf.decode("utf-8", errors="replace")
+                        # Match patterns like "1. 扫码登录" or "1) 扫码" or "1: 扫码"
+                        import re as _re
+                        m = _re.search(r'(\d+)\s*[.):\s、]\s*扫码', menu_text)
+                        if m:
+                            qr_option = m.group(1)
+                            _time.sleep(0.3)
+                            _os.write(master_fd, f"{qr_option}\n".encode())
+                            print(f"\n  {D}检测到扫码选项: {qr_option}{X}", flush=True)
+                            print(f"  {D}请用B站App扫码{X}", flush=True)
+                            sent = True
+
+                if not sent:
+                    # Couldn't find QR option; dump menu for user
+                    menu_text = menu_buf.decode("utf-8", errors="replace")
+                    print(f"\n  {Y}未能自动匹配扫码选项，请手动输入:{X}")
+                    # Forward stdin/stdout for manual interaction
+                    _os.write(master_fd, b"\n")
+
+                # Forward remaining output until process exits
+                while proc.poll() is None:
+                    ready, _, _ = select.select([master_fd], [], [], 1.0)
+                    if ready:
+                        try:
+                            chunk = _os.read(master_fd, 4096)
+                            sys.stdout.buffer.write(chunk)
+                            sys.stdout.flush()
+                        except OSError:
+                            break
+
+                _os.close(master_fd)
                 if proc.returncode == 0 and COOKIE_FILE.exists():
                     print(f"  {G}B站登录成功!{X}")
                     return True
-            except (subprocess.TimeoutExpired, Exception) as e:
-                print(f"  {Y}直接登录未完成: {e}{X}")
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+
+            except (ImportError, OSError, Exception) as e:
+                # pty not available (Windows) or other error
+                print(f"  {Y}PTY 登录方式不可用: {e}{X}")
+                # Fallback: direct run without pty (user sees menu, types manually)
+                print(f"  {Y}请手动选择「扫码登录」并用B站App扫码{X}")
+                result = subprocess.run(
+                    [str(biliup_exe), "-u", str(COOKIE_FILE), "login"],
+                    cwd=str(PROJECT_ROOT / "vendor"),
+                )
+                if result.returncode == 0 and COOKIE_FILE.exists():
+                    print(f"  {G}B站登录成功!{X}")
+                    return True
 
             # Strategy B: Open in new Terminal window (fallback if inline failed)
             sh_path = PROJECT_ROOT / "vendor" / "_bilibili_login.sh"
@@ -1668,10 +1720,12 @@ def _qr_login_bat() -> bool:
                 f'BILIUP="{biliup_exe}"\n'
                 f'COOKIE="{COOKIE_FILE}"\n'
                 f'echo "========================================"\n'
-                f'echo "   B站登录 - 自动选择扫码登录"\n'
+                f'echo "   B站登录"\n'
                 f'echo "========================================"\n'
                 f'echo ""\n'
-                f'echo "1" | "$BILIUP" -u "$COOKIE" login\n'
+                f'echo "请选择「扫码登录」选项，然后用B站App扫码"\n'
+                f'echo ""\n'
+                f'"$BILIUP" -u "$COOKIE" login\n'
                 f'echo ""\n'
                 f'echo "登录完成，可关闭此窗口。"\n'
                 f'read -p "按回车键关闭..."\n'
