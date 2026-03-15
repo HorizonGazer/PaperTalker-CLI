@@ -1,0 +1,12 @@
+# PaperTalker Schedule (Tab-Separated Format)
+# Columns: date	topic	source_mode	platforms	max_results	status	completed_at	notes
+#
+# source_mode: research (NotebookLM, 默认) | search (literature-review) | file (本地PDF) | paper (按标题搜索)
+# platforms:   bilibili,weixin_channels (逗号分隔)
+# status:      pending | completed | failed
+# notes:       auto_tracker = 自动追踪生成 | 用户手动添加留空
+#
+# ────────────────────────────────────────────────────────────────────────────
+queue	单细胞测序	research	bilibili,weixin_channels	5	pending		
+queue	LLM Agent	research	bilibili,weixin_channels	5	pending		
+queue	CRISPR 2025	research	bilibili,weixin_channels	5	pending		

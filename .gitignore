@@ -1,0 +1,86 @@
+# Environment variables (contains sensitive API keys)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# Conda
+.conda/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Output files
+output/
+output_subtitled/*
+!output_subtitled/.gitkeep
+*.mp4
+*.mp3
+*.wav
+*.jpg
+
+# Cookies and credentials
+cookies/
+
+# Vendor: only ignore the macOS tarball (too large)
+vendor/biliupR-*.tar.xz
+
+# NotebookLM authentication
+.notebooklm/
+storage_state.json
+
+# Playwright
+.playwright/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+run_history.txt
+tracker_history.txt
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+
+# Test outputs
+skills/*/scripts/test_*
+skills/*/references/run_history.json
+# Browser profiles
+**/browser_profile/
