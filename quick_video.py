@@ -95,17 +95,25 @@ async def preflight_check() -> bool:
             break
         except (ValueError, Exception) as e:
             if _login_attempt == 0 and ("expired" in str(e).lower() or "authentication" in str(e).lower() or "redirect" in str(e).lower()):
-                warn(f"认证过期，自动重新登录...")
+                warn(f"认证过期，尝试自动刷新...")
                 import subprocess
                 login_script = str(CLI_DIR / "tools" / "auto_login.py")
+                # Try silent refresh first (headless, no user interaction)
                 login_result = subprocess.run(
-                    [sys.executable, login_script],
-                    timeout=720,
+                    [sys.executable, login_script, "--refresh"],
+                    timeout=120,
                 )
+                if login_result.returncode != 0:
+                    # Silent refresh failed, try full auto_login (may open browser)
+                    warn("无头刷新失败，尝试打开浏览器登录...")
+                    login_result = subprocess.run(
+                        [sys.executable, login_script],
+                        timeout=720,
+                    )
                 if login_result.returncode != 0:
                     err("自动登录失败，请手动运行: python tools/auto_login.py")
                     return False
-                ok("自动登录成功，重试连接...")
+                ok("认证刷新成功，重试连接...")
                 continue
             err(f"连接失败: {e}")
             return False
@@ -560,17 +568,23 @@ async def run(
             break
         except (ValueError, Exception) as e:
             if _login_attempt == 0 and ("expired" in str(e).lower() or "authentication" in str(e).lower() or "redirect" in str(e).lower()):
-                warn(f"认证过期，自动重新登录...")
+                warn(f"认证过期，尝试自动刷新...")
                 import subprocess
                 login_script = str(CLI_DIR / "tools" / "auto_login.py")
                 login_result = subprocess.run(
-                    [sys.executable, login_script],
-                    timeout=720,
+                    [sys.executable, login_script, "--refresh"],
+                    timeout=120,
                 )
+                if login_result.returncode != 0:
+                    warn("无头刷新失败，尝试打开浏览器登录...")
+                    login_result = subprocess.run(
+                        [sys.executable, login_script],
+                        timeout=720,
+                    )
                 if login_result.returncode != 0:
                     err("自动登录失败，请手动运行: python tools/auto_login.py")
                     return None
-                ok("自动登录成功，继续执行...")
+                ok("认证刷新成功，继续执行...")
                 continue
             raise
 
@@ -797,17 +811,23 @@ async def resume_video(
             break
         except (ValueError, Exception) as e:
             if _login_attempt == 0 and ("expired" in str(e).lower() or "authentication" in str(e).lower() or "redirect" in str(e).lower()):
-                warn(f"认证过期，自动重新登录...")
+                warn(f"认证过期，尝试自动刷新...")
                 import subprocess
                 login_script = str(CLI_DIR / "tools" / "auto_login.py")
                 login_result = subprocess.run(
-                    [sys.executable, login_script],
-                    timeout=720,
+                    [sys.executable, login_script, "--refresh"],
+                    timeout=120,
                 )
+                if login_result.returncode != 0:
+                    warn("无头刷新失败，尝试打开浏览器登录...")
+                    login_result = subprocess.run(
+                        [sys.executable, login_script],
+                        timeout=720,
+                    )
                 if login_result.returncode != 0:
                     err("自动登录失败，请手动运行: python tools/auto_login.py")
                     return None
-                ok("自动登录成功，继续执行...")
+                ok("认证刷新成功，继续执行...")
                 continue
             raise
 

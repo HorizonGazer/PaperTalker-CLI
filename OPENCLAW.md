@@ -89,7 +89,7 @@ PaperTalker-CLI/
 ├── deps/
 │   └── notebooklm-py/          # NotebookLM Python 客户端 (本地可编辑安装)
 ├── tools/
-│   ├── auto_login.py           # NotebookLM 自动登录 (浏览器弹出)
+│   ├── auto_login.py           # NotebookLM 认证管理 (--refresh/--check/默认自动)
 │   └── verify.py               # 依赖完整性验证
 ├── setup/
 │   ├── setup.bat               # Windows 一键安装
@@ -698,7 +698,7 @@ PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 "<PYTHON_PATH>" -u <script.py> [args..
 | 错误场景                 | 恢复方法                                  | 注意事项                              |
 | ------------------------ | ----------------------------------------- | ------------------------------------- |
 | 网络中断 (Phase 1)       | `--resume NID TID`                        | **绝不重建笔记本**。等 2-3 分钟再恢复 |
-| NotebookLM 认证过期      | `quick_video.py --check` 自动触发重新登录 | 用户需在浏览器完成 Google 登录        |
+| NotebookLM 认证过期      | 自动: `auto_login.py --refresh` 无头刷新 → 弹浏览器 | 大部分情况无需人工 |
 | Deep Research 被限流     | 自动降级到 Fast Research                  | 或换 Google 账号                      |
 | B站 cookies 过期         | `publish.py` 自动展示终端 QR              | 用户用 B站 App 扫码                   |
 | 微信视频号过期           | `publish.py` 自动弹浏览器                 | 用户微信扫码                          |
