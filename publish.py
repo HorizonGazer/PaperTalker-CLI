@@ -680,6 +680,7 @@ def _qr_login_api() -> bool:
 
     # Step 1 — request QR code (retry up to 3 times)
     r = None
+    last_err = None
     for attempt in range(3):
         try:
             params = _sign({"appkey": _APP_KEY, "local_id": "0", "ts": int(time.time())})
@@ -691,12 +692,12 @@ def _qr_login_api() -> bool:
             if r and r.get("code") == 0:
                 break
         except Exception as e:
+            last_err = e
             if attempt < 2:
                 print(f"  {D}QR请求失败 (retry {attempt+1}/3): {e}{X}")
-                time.sleep(1)
-                raise RuntimeError(f"QR request failed after 3 retries: {e}")
+                time.sleep(2)
     if not r or r.get("code") != 0:
-        raise RuntimeError(f"QR request failed: {r}")
+        raise RuntimeError(f"QR request failed: {r or last_err}")
 
     url = r["data"]["url"]
     auth_code = r["data"]["auth_code"]
@@ -1631,16 +1632,33 @@ def _qr_login_bat() -> bool:
                 pass
 
             # Strategy A: Direct inline execution (most reliable on macOS)
-            # biliup login is interactive (shows menu), works in current terminal
-            print(f"  {Y}在当前终端执行B站登录...{X}")
-            print(f"  {D}请选择「扫码登录」并用B站App扫码{X}")
-            result = subprocess.run(
-                [str(biliup_exe), "-u", str(COOKIE_FILE), "login"],
-                cwd=str(PROJECT_ROOT / "vendor"),
-            )
-            if result.returncode == 0 and COOKIE_FILE.exists():
-                print(f"  {G}B站登录成功!{X}")
-                return True
+            # biliup login shows interactive menu; auto-send "1" to select QR scan
+            print(f"  {Y}在当前终端执行B站登录 (自动选择扫码)...{X}")
+            print(f"  {D}请用B站App扫码{X}")
+            try:
+                proc = subprocess.Popen(
+                    [str(biliup_exe), "-u", str(COOKIE_FILE), "login"],
+                    cwd=str(PROJECT_ROOT / "vendor"),
+                    stdin=subprocess.PIPE,
+                )
+                # Send "1\n" to auto-select QR scan option (usually option 1)
+                import time as _time
+                _time.sleep(1)  # Wait for menu to appear
+                try:
+                    proc.stdin.write(b"1\n")
+                    proc.stdin.flush()
+                except Exception:
+                    pass
+                proc.wait(timeout=300)
+                if proc.returncode == 0 and COOKIE_FILE.exists():
+                    print(f"  {G}B站登录成功!{X}")
+                    return True
+            except (subprocess.TimeoutExpired, Exception) as e:
+                print(f"  {Y}直接登录未完成: {e}{X}")
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
             # Strategy B: Open in new Terminal window (fallback if inline failed)
             sh_path = PROJECT_ROOT / "vendor" / "_bilibili_login.sh"
@@ -1650,10 +1668,10 @@ def _qr_login_bat() -> bool:
                 f'BILIUP="{biliup_exe}"\n'
                 f'COOKIE="{COOKIE_FILE}"\n'
                 f'echo "========================================"\n'
-                f'echo "   B站登录 - 请选择「扫码登录」"\n'
+                f'echo "   B站登录 - 自动选择扫码登录"\n'
                 f'echo "========================================"\n'
                 f'echo ""\n'
-                f'"$BILIUP" -u "$COOKIE" login\n'
+                f'echo "1" | "$BILIUP" -u "$COOKIE" login\n'
                 f'echo ""\n'
                 f'echo "登录完成，可关闭此窗口。"\n'
                 f'read -p "按回车键关闭..."\n'
