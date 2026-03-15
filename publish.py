@@ -1551,13 +1551,16 @@ def _qr_login_bat() -> bool:
                 pass
             # Write a temp shell script that Terminal.app can execute
             sh_path = PROJECT_ROOT / "vendor" / "_bilibili_login.sh"
+            # Use shell variables to avoid path quoting issues
             sh_content = (
                 f'#!/bin/bash\n'
+                f'BILIUP="{biliup_exe}"\n'
+                f'COOKIE="{COOKIE_FILE}"\n'
                 f'echo "========================================"\n'
                 f'echo "   B站登录 - 请选择「扫码登录」"\n'
                 f'echo "========================================"\n'
                 f'echo ""\n'
-                f'"{biliup_exe}" -u "{COOKIE_FILE}" login\n'
+                f'"$BILIUP" -u "$COOKIE" login\n'
                 f'echo ""\n'
                 f'echo "登录完成，可关闭此窗口。"\n'
                 f'read -p "按回车键关闭..."\n'
@@ -1572,7 +1575,7 @@ def _qr_login_bat() -> bool:
                 ["open", "-a", "Terminal", str(sh_path)],
                 # Fallback: osascript
                 ["osascript", "-e",
-                 f'tell application "Terminal" to do script "bash {sh_path}"'],
+                 f'tell application "Terminal" to do script "bash \\"{sh_path}\\""'],
             ]:
                 try:
                     subprocess.Popen(term_cmd, cwd=str(PROJECT_ROOT / "vendor"))
