@@ -129,12 +129,15 @@ def _transcribe_chunk(args):
     import tempfile as _tf
 
     script_content = '''
-import os, sys, pickle
+import os, sys, platform, pickle
 os.environ["MKL_THREADING_LAYER"] = "sequential"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
 from faster_whisper import WhisperModel
+
+# ── Device detection (Windows CUDA / macOS Apple Silicon / Linux CUDA / CPU) ──
+_is_mac_arm = platform.system() == "Darwin" and platform.machine() in ("arm64", "aarch64")
 
 try:
     import ctranslate2
@@ -142,13 +145,52 @@ try:
 except Exception:
     _has_cuda = False
 
-_device = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] != "auto" else ("cuda" if _has_cuda else "cpu")
-_model = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] != "auto" else ("large-v3" if _has_cuda else "small")
-_ctype = "float16" if _device == "cuda" else "int8"
+# User override > CUDA > Apple Silicon optimized CPU > generic CPU
+_user_device = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] != "auto" else None
+_user_model = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] != "auto" else None
 
-print(f"  whisper[{sys.argv[5]}]: {_model} on {_device} ({_ctype})", flush=True)
+if _user_device:
+    _device = _user_device
+elif _has_cuda:
+    _device = "cuda"
+else:
+    _device = "cpu"
 
-model = WhisperModel(_model, device=_device, compute_type=_ctype)
+# Model selection:
+#   CUDA: large-v3 (best quality, VRAM allows)
+#   Apple Silicon: medium (good balance; large-v3 on int8 ARM works but slower)
+#   Generic CPU: small (fastest, acceptable quality)
+if _user_model:
+    _model = _user_model
+elif _has_cuda:
+    _model = "large-v3"
+elif _is_mac_arm:
+    _model = "medium"  # Apple Silicon handles medium well with 8GB+ RAM
+else:
+    _model = "small"
+
+# Compute type:
+#   CUDA: float16 (fast, full precision on GPU)
+#   Apple Silicon ARM: float32 (int8 can cause artifacts on some ARM builds)
+#   Generic CPU: int8 (fastest on x86)
+if _device == "cuda":
+    _ctype = "float16"
+elif _is_mac_arm:
+    _ctype = "float32"  # Safest on Apple Silicon; avoids int8 ARM edge cases
+else:
+    _ctype = "int8"
+
+# Thread optimization for Apple Silicon (use performance cores)
+if _is_mac_arm:
+    _num_threads = min(os.cpu_count() or 4, 8)  # M1=8, M2/M3/M4 Pro=10-12
+    os.environ["OMP_NUM_THREADS"] = str(_num_threads)
+    os.environ["MKL_NUM_THREADS"] = str(_num_threads)
+
+_platform_tag = "Apple Silicon" if _is_mac_arm else ("CUDA" if _has_cuda else "CPU")
+print(f"  whisper[{sys.argv[5]}]: {_model} on {_device} ({_ctype}) [{_platform_tag}]", flush=True)
+
+model = WhisperModel(_model, device=_device, compute_type=_ctype,
+                     cpu_threads=_num_threads if _is_mac_arm else 0)
 segments, info = model.transcribe(
     sys.argv[1], language="zh", beam_size=5,
     vad_filter=True, vad_parameters=dict(min_silence_duration_ms=500),

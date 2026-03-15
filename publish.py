@@ -536,24 +536,105 @@ def generate_srt(segments: list, srt_path: Path) -> int:
 
 
 def burn_subtitles(ffmpeg: str, input_mp4: Path, srt_path: Path, output_mp4: Path) -> bool:
-    """Burn hardcoded subtitles into video using FFmpeg (lossless quality)."""
+    """Burn hardcoded subtitles into video using FFmpeg.
+    
+    Auto-detects platform to use the correct font:
+    - Windows: Microsoft YaHei
+    - macOS: PingFang SC (苹方) → Hiragino Sans GB → STHeiti → Arial Unicode MS
+    - Linux: Noto Sans CJK SC → WenQuanYi Micro Hei → sans-serif
+    """
+    import platform as _plat
+    
     srt_escaped = str(srt_path).replace("\\", "/").replace(":", "\\:")
+    
+    # Pick font by platform
+    if sys.platform == "win32":
+        font_name = "Microsoft YaHei"
+    elif _plat.system() == "Darwin":
+        # macOS: try PingFang SC (built-in since 10.11), fallback chain
+        font_name = _detect_macos_cjk_font(ffmpeg)
+    else:
+        font_name = _detect_linux_cjk_font()
+    
     vf = (
         f"subtitles='{srt_escaped}':force_style='"
-        f"FontSize=20,FontName=Microsoft YaHei,"
+        f"FontSize=20,FontName={font_name},"
         f"PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
         f"Outline=2,MarginV=30'"
     )
-    # -crf 0: mathematically lossless H.264
-    # -preset fast: balance encode speed vs file size (lossless ignores most preset effects)
-    # -c:a copy: audio stream untouched
     result = subprocess.run(
         [ffmpeg, "-i", str(input_mp4), "-vf", vf,
-         "-c:v", "libx264", "-crf", "0", "-preset", "fast",
+         "-c:v", "libx264",  "-crf", "18", "-preset", "fast",
          "-c:a", "copy", "-y", str(output_mp4)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
+    if result.returncode != 0:
+        # Retry without force_style font (let libass pick default)
+        print(f"  {Y}subtitle burn failed with {font_name}, retrying with default font...{X}", flush=True)
+        vf_fallback = (
+            f"subtitles='{srt_escaped}':force_style='"
+            f"FontSize=20,"
+            f"PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+            f"Outline=2,MarginV=30'"
+        )
+        result = subprocess.run(
+            [ffmpeg, "-i", str(input_mp4), "-vf", vf_fallback,
+             "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+             "-c:a", "copy", "-y", str(output_mp4)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
     return result.returncode == 0
+
+
+def _detect_macos_cjk_font(ffmpeg: str = None) -> str:
+    """Detect available CJK font on macOS for subtitle rendering."""
+    # Priority: PingFang SC > Hiragino Sans GB > STHeiti > Arial Unicode MS
+    candidates = [
+        "PingFang SC",
+        "Hiragino Sans GB",
+        "STHeiti",
+        "Arial Unicode MS",
+        "Songti SC",
+    ]
+    try:
+        # Use fc-list to check available fonts (if fontconfig installed)
+        result = subprocess.run(
+            ["fc-list", ":lang=zh", "family"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            available = result.stdout
+            for font in candidates:
+                if font in available or font.replace(" ", "") in available:
+                    return font
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    # Default: PingFang SC (built-in on macOS 10.11+)
+    return "PingFang SC"
+
+
+def _detect_linux_cjk_font() -> str:
+    """Detect available CJK font on Linux for subtitle rendering."""
+    candidates = [
+        "Noto Sans CJK SC",
+        "WenQuanYi Micro Hei",
+        "WenQuanYi Zen Hei",
+        "Droid Sans Fallback",
+        "sans-serif",
+    ]
+    try:
+        result = subprocess.run(
+            ["fc-list", ":lang=zh", "family"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            available = result.stdout
+            for font in candidates:
+                if font in available:
+                    return font
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return "Noto Sans CJK SC"
 
 
 def ensure_bilibili_login() -> bool:
@@ -1535,13 +1616,12 @@ def _qr_login_bat() -> bool:
         launched = False
 
         if _plat.system() == "Darwin":
-            # macOS: ensure binary is executable, then launch in Terminal.app
+            # macOS: ensure binary is executable + remove quarantine
             try:
                 import os
                 os.chmod(str(biliup_exe), 0o755)
             except Exception:
                 pass
-            # Remove quarantine attribute (macOS blocks unsigned binaries)
             try:
                 subprocess.run(
                     ["xattr", "-d", "com.apple.quarantine", str(biliup_exe)],
@@ -1549,11 +1629,24 @@ def _qr_login_bat() -> bool:
                 )
             except Exception:
                 pass
-            # Write a temp shell script that Terminal.app can execute
+
+            # Strategy A: Direct inline execution (most reliable on macOS)
+            # biliup login is interactive (shows menu), works in current terminal
+            print(f"  {Y}在当前终端执行B站登录...{X}")
+            print(f"  {D}请选择「扫码登录」并用B站App扫码{X}")
+            result = subprocess.run(
+                [str(biliup_exe), "-u", str(COOKIE_FILE), "login"],
+                cwd=str(PROJECT_ROOT / "vendor"),
+            )
+            if result.returncode == 0 and COOKIE_FILE.exists():
+                print(f"  {G}B站登录成功!{X}")
+                return True
+
+            # Strategy B: Open in new Terminal window (fallback if inline failed)
             sh_path = PROJECT_ROOT / "vendor" / "_bilibili_login.sh"
-            # Use shell variables to avoid path quoting issues
             sh_content = (
                 f'#!/bin/bash\n'
+                f'cd "{PROJECT_ROOT / "vendor"}"\n'
                 f'BILIUP="{biliup_exe}"\n'
                 f'COOKIE="{COOKIE_FILE}"\n'
                 f'echo "========================================"\n'
@@ -1571,9 +1664,7 @@ def _qr_login_bat() -> bool:
             except Exception:
                 pass
             for term_cmd in [
-                # Best: open shell script in Terminal.app
                 ["open", "-a", "Terminal", str(sh_path)],
-                # Fallback: osascript
                 ["osascript", "-e",
                  f'tell application "Terminal" to do script "bash \\"{sh_path}\\""'],
             ]:
